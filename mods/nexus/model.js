@@ -131,12 +131,17 @@ export function landOffer(rv, pr = null) {
   return { kind: "press", head: rv.head, body: waives.length === 0 ? { head: rv.head } : { head: rv.head, waive: waives }, waives };
 }
 
+/** The phases of an item still to land, in pipeline order. */
+const openPhases = ["held", "planned", "queued", "building", "reviewing", "landing"];
+
+/** Pipeline items still to land. */
+export const openItems = (items) => items.filter((i) => openPhases.includes(i.phase.kind));
+
 /** Pipeline items still to land, by phase in pipeline order, then the recently finished. */
 export function itemGroups(items) {
-  const order = ["held", "planned", "queued", "building", "reviewing", "landing"];
   const titles = { held: "Held for you", planned: "Planned", queued: "Queued", building: "Building", reviewing: "In review", landing: "Landing" };
-  const open = order.map((kind) => ({ key: kind, title: titles[kind], items: items.filter((i) => i.phase.kind === kind) })).filter((g) => g.items.length > 0);
-  const done = items.filter((i) => !order.includes(i.phase.kind)).sort((a, b) => b.addedAt - a.addedAt).slice(0, 20);
+  const open = openPhases.map((kind) => ({ key: kind, title: titles[kind], items: items.filter((i) => i.phase.kind === kind) })).filter((g) => g.items.length > 0);
+  const done = items.filter((i) => !openPhases.includes(i.phase.kind)).sort((a, b) => b.addedAt - a.addedAt).slice(0, 20);
   return done.length === 0 ? open : [...open, { key: "done", title: "Finished", items: done }];
 }
 
