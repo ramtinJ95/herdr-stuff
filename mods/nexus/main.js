@@ -1,6 +1,6 @@
 // Nexus in Herdr: what waits on you, the work in flight, every open thread with its live conversation, questions,
 // review and changes, the pipeline items, the cluster and usage.
-// Docked as a pane (pane.split {mod: "nexus"}) or as a dialog (mod.open:nexus); each can switch to the other.
+// Docked as a pane (pane.split {mod: "nexus"}) or as a floating window (mod.open:nexus); each can switch to the other.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextareaState } from "gpui-base";
 import { closeOverlay, exec, focused, hc, nextCommand, notify, panes, props, run, setShared, shared, theme, window as appWindow } from "herdr";
@@ -19,6 +19,8 @@ const confirmMs = 6_000;
 const viewKey = "nexus.view";
 const notifiedKey = "nexus.notified";
 const pageTabs = ["items", "cluster", "usage"];
+/** Keeps a press from dragging the window, so the control under it gets it. */
+const stop = (_e, cx) => cx.stop_propagation();
 
 export default class Nexus extends View {
   init(_props, cx) {
@@ -43,6 +45,8 @@ export default class Nexus extends View {
     this.message = TextareaState.new({ placeholder: "Message the agent", rows: 3 });
     this.prompt = TextareaState.new({ placeholder: "What should the thread do?", rows: 6 });
     this.handle = cx.focus_handle();
+    // A window doesn't take the keyboard when it opens; one opened by its key is meant to be used straight away.
+    if (props()?.overlay) this.handle.focus();
     // The open thread's conversation, followed while it is shown.
     this.live = null;
     this.stream = null;
@@ -310,7 +314,7 @@ export default class Nexus extends View {
     });
   }
 
-  /** A dialog is on screen while open; a docked copy while its tab is the one shown. */
+  /** A window is on screen while open; a docked copy while its tab is the one shown. */
   onScreen() {
     if (props()?.overlay) return true;
     const mine = panes().find((p) => p.pane === this.ownPane());
@@ -453,7 +457,7 @@ export default class Nexus extends View {
     exec(appWindow().platform === "macos" ? "open" : "xdg-open", [url]);
   }
 
-  /** The pane this copy is docked in, or null in the dialog. */
+  /** The pane this copy is docked in, or null in the window. */
   ownPane() {
     if (props()?.overlay) return null;
     const mine = panes().filter((p) => p.mod === "nexus");
@@ -493,20 +497,28 @@ export default class Nexus extends View {
       : threadList(this, ui, now);
     const statusText = this.status.text || (this.syncedAt === null ? "" : `${countOpen(this.rows)} open · synced ${ago(this.syncedAt, now)}`);
 
-    return v_flex().id("nexus").track_focus(this.handle).size_full().bg(t.surface).text_color(t.foreground)
+    // The window drags by its header; presses below it stay with the tabs, rows, text and fields.
+    return v_flex().id("nexus").track_focus(this.handle).size_full().bg(t.background).text_color(t.foreground)
+      .on_key_down((e, cx) => {
+        if (e.key === "escape" && inOverlay) {
+          cx.stop_propagation();
+          closeOverlay(props().overlay);
+        }
+      })
       .child(h_flex().flex_none().h(40).px(12).gap(8).items_center().border_b_1().border_color(t.border)
         .child(div().text_size(14).font_semibold().child("Nexus"))
         .child(div().flex_1().truncate().text_size(11.5).text_color(t.dim).child(host))
         .child(button("new", "New thread", (cx) => this.show(cx, { tab: "start", thread: null }), { primary: true }))
-        .child(inOverlay ? button("dock", "Dock", () => this.dock()) : button("popout", "Pop out", () => this.popOut())))
-      .child(h_flex().flex_none().flex_wrap().px(8).py(6).gap(4).border_b_1().border_color(t.border)
+        .child(inOverlay ? button("dock", "Dock", () => this.dock()) : button("popout", "Pop out", () => this.popOut()))
+        .when(inOverlay, (el) => el.child(button("close", "✕", () => closeOverlay(props().overlay)))))
+      .child(h_flex().id("tabs").flex_none().flex_wrap().px(8).py(6).gap(4).border_b_1().border_color(t.border).on_mouse_down("left", stop)
         .child(tab("needs", "Needs you"))
         .child(tab("flight", "In flight"))
         .child(tab("threads", "Threads"))
         .child(tab("items", "Items"))
         .child(tab("cluster", "Cluster"))
         .child(tab("usage", "Usage")))
-      .child(v_flex().id("body").flex_1().min_h(0).px(12).pb(12).overflow_y_scrollbar().children(body))
+      .child(v_flex().id("body").flex_1().min_h(0).px(12).pb(12).overflow_y_scrollbar().on_mouse_down("left", stop).children(body))
       .child(h_flex().flex_none().h(26).px(12).items_center().border_t_1().border_color(t.border)
         .child(div().truncate().text_size(11).text_color(this.status.level === "error" ? t.blocked : t.dim).child(statusText)));
   }

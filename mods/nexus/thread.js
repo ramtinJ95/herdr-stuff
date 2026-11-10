@@ -78,7 +78,7 @@ function questionCards(app, ui, d) {
         .child(div().text_size(11).font_semibold().text_color(t.dim).child(a.header.toUpperCase() + (a.multiSelect ? " · pick any" : "")))
         .child(div().text_size(12.5).text_color(t.foreground).child(a.question))
         .child(v_flex().pt(2).gap(4).children(a.options.map((o, oi) => chip(`q-${q.id}-${i}-${oi}`, o.description ? `${o.label}: ${o.description}` : o.label, (picks[i] ?? []).includes(o.label), () => app.pickOption(q, i, o.label, a.multiSelect)))))
-        .children(app.ownInput(q.id, i) === null ? [] : [Textarea.new(app.ownInput(q.id, i)).w_full().h(48).p(6).rounded(6).border_1().border_color(t.input).bg(t.background).text_size(12).text_color(t.foreground)]));
+        .children(app.ownInput(q.id, i) === null ? [] : [Textarea.new(app.ownInput(q.id, i)).w_full().h(48).p(6).rounded(6).border_1().border_color(t.input).bg(t.surface).text_size(12).text_color(t.foreground)]));
       return card(`qcard-${q.id}`, t.blocked).child(div().text_size(12).text_color(t.muted).child("Claude asks"))
         .children(asked)
         .child(h_flex().pt(8).justify_end().child(button(`qsend-${q.id}`, app.sending ? "Answering…" : "Answer", (cx) => app.answerAsk(cx, q), { primary: true })));
@@ -138,7 +138,7 @@ function composer(app, ui, d, open) {
   const busy = d.thread.agentTurnRunning || app.live?.working === true;
   return v_flex()
     .child(heading("Message"))
-    .child(Textarea.new(app.message).w_full().h(84).p(8).rounded(6).border_1().border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground))
+    .child(Textarea.new(app.message).w_full().h(84).p(8).rounded(6).border_1().border_color(t.input).bg(t.surface).text_size(12.5).text_color(t.foreground))
     .child(h_flex().pt(8).gap(6).justify_end()
       .children(busy && d.claudeWorker === null ? [button("steer", "Steer now", (cx) => app.sendMessage(cx, d.thread.id, "steer"))] : [])
       .child(button("send", app.sending ? "Sending…" : busy ? "Queue" : "Send", (cx) => app.sendMessage(cx, d.thread.id, "followUp"), { primary: true })));
@@ -184,7 +184,7 @@ function blockView(app, ui, b, now) {
           .child(div().size(6).rounded(3).flex_none().bg(color))
           .child(div().flex_none().text_size(11.5).font_semibold().text_color(t.muted).child(b.name))
           .child(div().flex_1().truncate().text_size(11.5).text_color(t.dim).child(b.text)))
-        .when(open && b.output !== null, (el) => el.child(div().mt(2).p(6).rounded(4).bg(t.background).text_size(11).text_color(t.muted)
+        .when(open && b.output !== null, (el) => el.child(div().mt(2).p(6).rounded(4).bg(t.surface).text_size(11).text_color(t.muted)
           .child(TextView.markdown(`out-${b.key}`, "```\n" + clipOutput(b.output) + "\n```").selectable(true))));
     }
     case "notice":
@@ -227,7 +227,7 @@ function changesView(app, ui, id) {
           .child(div().flex_1().truncate().text_size(12).text_color(t.foreground).child(f.oldPath ? `${f.oldPath} → ${f.path}` : f.path))
           .child(div().flex_none().text_size(11).text_color(t.dim).child(f.additions === null ? "binary" : `+${f.additions} −${f.deletions}`)))
         .when(shown, (el) => el.child(c.diff.text === null ? empty("Reading the diff…")
-          : div().mt(2).p(6).rounded(4).bg(t.background).text_size(11).child(TextView.markdown(`diff-${f.path}`, "```diff\n" + clipOutput(c.diff.text, 30000) + "\n```").selectable(true))));
+          : div().mt(2).p(6).rounded(4).bg(t.surface).text_size(11).child(TextView.markdown(`diff-${f.path}`, "```diff\n" + clipOutput(c.diff.text, 30000) + "\n```").selectable(true))));
     }),
   ];
 }
