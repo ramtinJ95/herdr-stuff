@@ -40,7 +40,7 @@ export function startForm(app, ui) {
       .child(chip("w-claude", "Claude Code", app.worker === "claude", () => { app.worker = "claude"; }))
       .child(chip("w-harness", "Nexus agent", app.worker === "harness", () => { app.worker = "harness"; })),
     heading(app.worker === "claude" ? "Prompt" : "First message"),
-    Textarea.new(app.prompt).w_full().h(140).p(8).rounded(6).border_1().border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground),
+    Textarea.new(app.prompt).w_full().h(140).p(8).rounded(6).border_1().border_color(t.input).bg(t.surface).text_size(12.5).text_color(t.foreground),
     h_flex().pt(10).justify_end().child(button("start-go", app.sending ? "Starting…" : "Start thread", (cx) => app.startThread(cx), { primary: true })),
   ];
 }

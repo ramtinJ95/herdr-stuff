@@ -7,6 +7,7 @@ export function kit(t) {
     .border_1().border_color(look.primary ? t.solid : look.danger ? t.blocked : t.input)
     .bg(look.primary ? t.solid : t.raised)
     .text_color(look.primary ? t.solid_foreground : look.danger ? t.blocked : t.foreground).text_size(12)
+    .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
     .when(!look.disabled, (el) => el.cursor_pointer().hover((s) => s.opacity(0.85)).on_click((_e, cx) => action(cx)))
     .when(Boolean(look.disabled), (el) => el.opacity(0.45))
     .child(text);
