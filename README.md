@@ -5,6 +5,7 @@ Mods for the [Herdr app](https://herdr.dev), one folder each under `mods/`.
 | Mod | What it does |
 | --- | --- |
 | [nexus](mods/nexus) | Nexus threads beside your terminals: what waits on you, live conversations, answering questions, reviews and landing, pipeline items, the cluster and usage |
+| [tuido](mods/tuido) | Your tuido todo lists in a floating window: complete, add, open in your editor, sort, archive and sync |
 
 ## Install
 
@@ -15,7 +16,7 @@ git clone https://github.com/ramtinJ95/herdr-stuff.git
 ln -s "$PWD/herdr-stuff/mods/<mod>" ~/.config/herdr-app/mods/<mod>
 ```
 
-A `git pull` updates it. The app does not hot-reload a linked mod, so close and reopen it after a change.
+A mod's `keys.json` holds the keys it expects; merge its sections into `~/.config/herdr-app/keys.json`, keeping any key you already use. A `git pull` updates it. The app does not hot-reload a linked mod, so close and reopen it after a change.
 
 ## Develop
 
