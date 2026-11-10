@@ -1,0 +1,6 @@
+{
+  "place": "none",
+  "title": "Todos",
+  "focusable": true,
+  "overlay": { "kind": "window", "key": "tuido", "width": 820, "height": 0.85 }
+}
