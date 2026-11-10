@@ -16,7 +16,8 @@ export function kit(t) {
     .text_size(12).text_color(on ? t.foreground : t.muted).on_click((_e, cx) => { action(cx); cx.notify(); }).child(text);
   const tone = (attention) => ({ failed: t.blocked, decision: t.blocked, parked: t.blocked, limited: t.ansi3, reply: t.done, working: t.working, waiting: t.accent })[attention] ?? t.idle;
   const dot = (color) => div().size(8).rounded(4).flex_none().bg(color);
-  const heading = (text) => div().pt(12).pb(4).text_size(11).font_semibold().text_color(t.dim).child(text.toUpperCase());
+  const heading = (text) => div().mt(18).mb(4).pb(5).border_b_1().border_color(t.border)
+    .text_size(13).font_bold().text_color(t.foreground).child(text.toUpperCase());
   const empty = (text) => div().py(12).text_size(12.5).text_color(t.muted).child(text);
   const line = (text, color = t.muted) => div().pt(4).text_size(12).text_color(color).child(text);
   const card = (id, color = t.border) => div().id(id).mt(8).p(10).rounded(8).border_1().border_color(color).bg(t.raised);
