@@ -2,5 +2,5 @@
   "place": "none",
   "title": "Nexus",
   "focusable": true,
-  "overlay": { "kind": "window", "key": "nexus", "width": 820, "height": 0.85 }
+  "overlay": { "kind": "window", "key": "nexus", "width": 1000, "height": 0.9 }
 }
