@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { addArgs, ageLabel, daysBetween, destinations, dueLabel, glyph, groups, hiddenSummary, parseRoot, parseUse, rows } from "./model.js";
+import { addArgs, ageLabel, daysBetween, destinations, dueLabel, glyph, groups, hiddenSummary, parseNewList, parseRoot, parseUse, rows } from "./model.js";
 
 const task = (over) => ({ workspace: "work", list: "inbox", path: "/t/work/inbox.md", line: 1, state: "open", desc: "x", priority: "normal", ...over });
 
@@ -57,6 +57,8 @@ test("parses tuido's text replies", () => {
   assert.equal(parseUse(""), null);
   assert.equal(parseRoot("root      /home/me/todo\ngit       true\n"), "/home/me/todo");
   assert.equal(parseRoot("git true\n"), null);
+  assert.equal(parseNewList("✓ new list work/projects/migration\n"), "work/projects/migration");
+  assert.equal(parseNewList("· nothing\n"), null);
   assert.deepEqual(addArgs("  rotate certs  -p high -d fri "), ["rotate", "certs", "-p", "high", "-d", "fri"]);
   assert.deepEqual(addArgs("   "), []);
 });
