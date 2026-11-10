@@ -2,9 +2,9 @@
 // mod.open:tuido toggles it as the window mod.json describes; pane.split {mod: "tuido"} docks it beside a pane instead.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { closeOverlay, nextCommand, props, run, setShared, shared, theme, watchFolder } from "herdr";
+import { closeOverlay, keys, nextCommand, props, run, setShared, shared, theme, watchFolder } from "herdr";
 import { tuido } from "./cli.js";
-import { addArgs, ageLabel, destinations, dueLabel, glyph, groups, hiddenSummary, isoDay, locator, parseRoot, parseUse, rows } from "./model.js";
+import { addArgs, ageLabel, destinations, dueLabel, glyph, groups, hiddenSummary, isoDay, locator, parseNewList, parseRoot, parseUse, rows } from "./model.js";
 
 const viewKey = "tuido.view";
 /** A press that asks again (Archive) forgets the first press after this long. */
@@ -26,6 +26,8 @@ export default class Tuido extends View {
     /** Where quick add writes: a destination's spec (workspace/list[/section]), or null for tuido's capture list. */
     this.target = typeof saved.target === "string" ? saved.target : null;
     this.picking = false;
+    /** Typing a new list's name, at the foot of the picker. */
+    this.naming = false;
     this.tasks = [];
     this.lists = [];
     this.workspaces = [];
@@ -46,6 +48,8 @@ export default class Tuido extends View {
     this.handle = cx.focus_handle();
     this.input = InputState.new({ placeholder: "Add a task   -p high  -d fri  -t tag" });
     this.input.on("submit", (_e, cx) => this.add(cx));
+    this.listName = InputState.new({ placeholder: "oncall, or projects/migration" });
+    this.listName.on("submit", (_e, cx) => this.createList(cx));
     // A window opened by its key is for typing a task straight away.
     if (props()?.overlay) {
       this.input.focus();
@@ -55,7 +59,10 @@ export default class Tuido extends View {
     cx.timer.every(dayCheckMs, (cx) => this.refresh(cx));
     cx.spawn(async (cx) => {
       for (;;) {
-        if ((await nextCommand()) === "focus") this.input.focus();
+        // "focus" from pane.go; the rest from keys.json's mod:tuido section, such as "ctrl-s": "tuido.sync".
+        const command = await nextCommand();
+        if (command === "focus") this.input.focus();
+        else if (command === "sync") this.sync(cx);
         cx.notify();
       }
     });
@@ -152,7 +159,7 @@ export default class Tuido extends View {
       try {
         const r = await tuido(args, timeout);
         this.status = { level: "info", text: r.stdout.trim() };
-        after?.();
+        after?.(r);
       } catch (e) {
         this.status = { level: "error", text: message(e) };
       } finally {
@@ -177,11 +184,30 @@ export default class Tuido extends View {
     this.act(cx, "add", ["add", ...to, ...args], { after: () => this.input.set_value("") });
   }
 
+  sync(cx) {
+    this.act(cx, "sync", ["sync"], { timeout: 120_000 });
+  }
+
   pick(target) {
     this.target = target;
     this.picking = false;
+    this.naming = false;
     this.save();
     this.input.focus();
+  }
+
+  // tuido makes the file and commits it; the new list then becomes where tasks go, by the ref tuido reports.
+  createList(cx) {
+    const name = this.listName.value().trim();
+    if (name === "") return;
+    const workspace = this.current === null ? [] : ["-w", this.current];
+    this.act(cx, "new", ["new", ...workspace, "--", name], {
+      after: (r) => {
+        this.listName.set_value("");
+        const ref = parseNewList(r.stdout);
+        if (ref !== null) this.pick(ref);
+      },
+    });
   }
 
   use(cx, workspace) {
@@ -221,6 +247,8 @@ export default class Tuido extends View {
     const tone = { highest: t.ansi1, high: t.ansi3, medium: t.accent, normal: t.muted, low: t.dim, lowest: t.dim, done: t.done, cancelled: t.dim, progress: t.working, blocked: t.blocked };
     const overlay = props()?.overlay ?? null;
     const shown = groups(this.tasks, { workspace: this.allWorkspaces ? null : this.current, showHidden: this.showHidden });
+    // The key the person bound to tuido.sync, shown on the button so it can be learned there.
+    const syncKey = keys().find((k) => k.action === "tuido.sync")?.keys ?? null;
     const open = shown.reduce((n, g) => n + g.tasks.filter((k) => !k.hidden).length, 0);
 
     const control = (id, text, action, look = {}) => div().id(id).px(7).h(22).flex().items_center().rounded(5).flex_none()
@@ -234,7 +262,7 @@ export default class Tuido extends View {
       .child(div().text_size(11).text_color(t.dim).child(this.loaded ? `${open} open` : ""))
       .child(div().flex_1())
       .child(control("refresh", "↻", (cx) => this.refresh(cx), { busy: this.loading }))
-      .child(control("sync", "Sync", (cx) => this.act(cx, "sync", ["sync"], { timeout: 120_000 }), { busy: this.busy.has("sync") }))
+      .child(control("sync", syncKey ? `Sync  ${syncKey}` : "Sync", (cx) => this.sync(cx), { busy: this.busy.has("sync") }))
       .when(overlay !== null, (el) => el.child(control("close", "✕", () => closeOverlay(overlay))));
 
     const scopes = h_flex().flex_none().px(10).pt(8).gap(4).items_center().flex_wrap()
@@ -249,7 +277,7 @@ export default class Tuido extends View {
     const adder = h_flex().mx(10).mt(8).h(32).flex_none().gap(6)
       .child(h_flex().id("target").h_full().max_w(190).flex_none().px(9).gap(5).items_center().rounded(7).border_1()
         .border_color(this.picking ? t.accent : t.input).bg(t.surface).cursor_pointer().hover((s) => s.bg(t.hover))
-        .on_mouse_down("left", stop).on_click((_e, cx) => { this.picking = !this.picking; cx.notify(); })
+        .on_mouse_down("left", stop).on_click((_e, cx) => { this.picking = !this.picking; this.naming = false; cx.notify(); })
         .child(div().text_size(11).text_color(t.dim).child("to"))
         .child(div().min_w(0).truncate().text_size(12).text_color(t.foreground).child(chosen === null ? "default list" : named(chosen)))
         .child(div().text_size(10).text_color(t.dim).child(this.picking ? "▴" : "▾")))
@@ -264,12 +292,23 @@ export default class Tuido extends View {
       .child(div().min_w(0).truncate().text_size(12).when(look.depth === 0, (el) => el.font_semibold())
         .text_color(look.usable ? t.foreground : t.dim).child(label))
       .when(Boolean(look.note), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(look.note)));
-    const picker = v_flex().id("targets").mx(10).mt(4).p(4).max_h(260).flex_none().overflow_y_scrollbar().rounded(7).border_1()
-      .border_color(t.border).bg(t.surface)
+    // The list scrolls; making a new one stays in reach below it.
+    const choices = v_flex().id("targets").max_h(240).overflow_y_scrollbar()
       .child(choice("to-default", "default list", null, { depth: 0, usable: true, note: "tuido's capture list" }))
       .children(destinations(this.lists, this.allWorkspaces ? null : this.current).map((d) => d.section === null
         ? choice(`to-${d.key}`, this.allWorkspaces ? d.key : d.list, d.spec, { depth: 0, usable: d.usable, note: d.usable ? (d.capture ? `→ ${d.capture}` : "") : "pick a section" })
         : choice(`to-${d.key}`, d.section, d.spec, { depth: 1, usable: true })));
+    const picker = v_flex().mx(10).mt(4).p(4).flex_none().rounded(7).border_1().border_color(t.border).bg(t.surface)
+      .child(choices)
+      .child(this.naming
+        ? h_flex().id("new-list").mt(4).h(30).px(8).gap(6).items_center().rounded(5).border_1()
+          .border_color(this.busy.has("new") ? t.accent : t.input).bg(t.background).cursor_text().on_mouse_down("left", stop)
+          .child(div().flex_none().text_size(11).text_color(t.dim).child(this.current === null ? "new list" : `new list in ${this.current}`))
+          .child(Input.new(this.listName).h_full().flex_1().min_w(0).text_size(12).text_color(t.foreground))
+        : h_flex().id("to-new").min_h(24).px(10).items_center().rounded(5).cursor_pointer().on_mouse_down("left", stop)
+          .hover((s) => s.bg(t.hover)).text_size(12).text_color(t.accent)
+          .on_click((_e, cx) => { this.naming = true; this.listName.focus(); cx.notify(); })
+          .child("+ New list…"));
 
     const notes = v_flex().flex_none().px(12).pt(6).gap(2)
       .when(this.warning !== null, (el) => el.child(div().text_size(11.5).text_color(t.ansi3).child(this.warning)))
@@ -327,7 +366,12 @@ export default class Tuido extends View {
     return v_flex().id("tuido").track_focus(this.handle).size_full().min_h(0).bg(t.background).text_color(t.foreground)
       .on_key_down((e, cx) => {
         if (e.key !== "escape") return;
-        if (this.picking) {
+        if (this.naming) {
+          this.naming = false;
+          this.input.focus();
+          cx.stop_propagation();
+          cx.notify();
+        } else if (this.picking) {
           this.picking = false;
           cx.stop_propagation();
           cx.notify();

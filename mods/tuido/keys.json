@@ -1,3 +1,4 @@
 {
-  "global": { "ctrl-f t": "mod.open:tuido" }
+  "global": { "ctrl-f t": "mod.open:tuido" },
+  "mod:tuido": { "ctrl-s": "tuido.sync" }
 }

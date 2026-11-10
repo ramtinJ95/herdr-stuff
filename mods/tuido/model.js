@@ -96,6 +96,11 @@ export function parseRoot(stdout) {
   return /^root\s+(.+)$/m.exec(stdout)?.[1].trim() ?? null;
 }
 
+/** The ref `tuido new` reports ("✓ new list work/oncall"), or null if it said something else. */
+export function parseNewList(stdout) {
+  return /^✓ new list (.+)$/m.exec(stdout)?.[1].trim() ?? null;
+}
+
 /** Quick-add text as `tuido add` arguments: words, so its flags (-p high -d fri -l list) work as on the command line. */
 export function addArgs(text) {
   return text.trim().split(/\s+/).filter((w) => w !== "");
