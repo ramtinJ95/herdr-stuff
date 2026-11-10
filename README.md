@@ -1,0 +1,22 @@
+# herdr-stuff
+
+Mods for the [Herdr app](https://herdr.dev), one folder each under `mods/`.
+
+| Mod | What it does |
+| --- | --- |
+| [nexus](mods/nexus) | Nexus threads beside your terminals: what waits on you, live conversations, answering questions, reviews and landing, pipeline items, the cluster and usage |
+
+## Install
+
+Clone the repo and link a mod into the app's mods:
+
+```sh
+git clone https://github.com/ramtinJ95/herdr-stuff.git
+ln -s "$PWD/herdr-stuff/mods/<mod>" ~/.config/herdr-app/mods/<mod>
+```
+
+A `git pull` updates it. The app does not hot-reload a linked mod, so close and reopen it after a change.
+
+## Develop
+
+Check a mod with `herdr-app check mods/<mod>`, and run every mod's tests with `npm test`. To add a mod, create `mods/<mod>/` with its `mod.json` and `main.js`, and list it in the table above.

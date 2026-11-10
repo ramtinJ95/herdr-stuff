@@ -1,0 +1,8 @@
+{
+  "name": "herdr-stuff",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test 'mods/**/*.test.js'"
+  }
+}

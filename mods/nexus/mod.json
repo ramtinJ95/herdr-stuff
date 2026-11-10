@@ -1,0 +1,6 @@
+{
+  "place": "none",
+  "title": "Nexus",
+  "focusable": true,
+  "overlay": { "kind": "dialog", "width": 0.72, "height": 0.82 }
+}
