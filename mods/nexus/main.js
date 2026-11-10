@@ -5,7 +5,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextareaState } from "gpui-base";
 import { closeOverlay, exec, focused, hc, nextCommand, notify, panes, props, run, setShared, shared, theme, window as appWindow } from "herdr";
 import { call, connect, follow, latestCursor, requestId } from "./api.js";
-import { ago, arrivalKey, arrivals, askBody, attentionLabel, attentionOf, changesThreads, countOpen, inFlight, needsYou, openQuestions, pick } from "./model.js";
+import { ago, arrivalKey, arrivals, askBody, attentionLabel, attentionOf, changesThreads, countOpen, inFlight, needsYou, openItems, openQuestions, pick } from "./model.js";
 import { applyClaude, applyHarness, emptyLive } from "./transcript.js";
 import { kit } from "./ui.js";
 import { pageBlocks, threadView } from "./thread.js";
@@ -69,7 +69,7 @@ export default class Nexus extends View {
         this.cursor = await this.newestEvent(cx);
         await this.refresh(cx, true);
         if (this.view.thread !== null) await this.loadDetail(cx, this.view.thread);
-        if (pageTabs.includes(this.view.tab)) await this.loadPage(cx, this.view.tab);
+        await this.loadPages(cx, true);
       } catch (e) {
         this.fail(cx, e);
       }
@@ -77,7 +77,7 @@ export default class Nexus extends View {
     cx.timer.every(pollMs, (cx) => { this.poll(cx); this.autoSeen(cx); this.expireConfirm(cx); });
     cx.timer.every(fullRefreshMs, (cx) => cx.spawn(async (cx) => {
       await this.refresh(cx, true);
-      if (this.view.thread === null && pageTabs.includes(this.view.tab)) await this.loadPage(cx, this.view.tab);
+      await this.loadPages(cx, this.view.thread === null);
     }));
     cx.spawn(async (cx) => {
       for (;;) {
@@ -338,6 +338,12 @@ export default class Nexus extends View {
     cx.notify();
   }
 
+  /** Loads the items, whose open count the Queued tab shows from any view, and the shown page when `shown`. */
+  async loadPages(cx, shown) {
+    const tabs = new Set(["items", ...shown && pageTabs.includes(this.view.tab) ? [this.view.tab] : []]);
+    await Promise.all([...tabs].map((tab) => this.loadPage(cx, tab)));
+  }
+
   /** Loads a page's data; the page keeps what it showed while it loads again. */
   async loadPage(cx, tab) {
     if (this.conn === null) return;
@@ -481,7 +487,7 @@ export default class Nexus extends View {
     const now = Date.now();
     const inOverlay = Boolean(props()?.overlay);
     const host = this.conn === null ? "" : this.conn.url.replace(/^https?:\/\//, "").split(/[.:]/)[0];
-    const counts = { needs: needsYou(this.rows).length, flight: inFlight(this.rows).reduce((n, g) => n + g.threads.length, 0), threads: countOpen(this.rows) };
+    const counts = { needs: needsYou(this.rows).length, flight: inFlight(this.rows).reduce((n, g) => n + g.threads.length, 0), threads: countOpen(this.rows), items: openItems(this.pages.items?.data ?? []).length };
 
     const tab = (key, text) => h_flex().id(`tab-${key}`).h(28).px(10).gap(6).items_center().rounded(6).cursor_pointer()
       .bg(this.view.tab === key && this.view.thread === null ? t.selected : t.surface).hover((s) => s.bg(t.hover))
@@ -515,7 +521,7 @@ export default class Nexus extends View {
         .child(tab("needs", "Needs you"))
         .child(tab("flight", "In flight"))
         .child(tab("threads", "Threads"))
-        .child(tab("items", "Items"))
+        .child(tab("items", "Queued"))
         .child(tab("cluster", "Cluster"))
         .child(tab("usage", "Usage")))
       .child(v_flex().id("body").flex_1().min_h(0).px(12).pb(12).overflow_y_scrollbar().on_mouse_down("left", stop).children(body))

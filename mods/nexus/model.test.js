@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { arrivalKey, arrivals, askBody, attentionOf, byProject, changesThreads, inFlight, itemGroups, landOffer, needsYou, openQuestions, pick, unstarted } from "./model.js";
+import { arrivalKey, arrivals, askBody, attentionOf, byProject, changesThreads, inFlight, itemGroups, landOffer, openItems, needsYou, openQuestions, pick, unstarted } from "./model.js";
 
 const row = (id, over = {}) => ({
   id, title: id, project: "p", status: "active", attention: null, working: false, createdAt: 1,
@@ -87,6 +87,7 @@ test("items group by phase in pipeline order, finished ones last; only an unstar
   const item = (id, kind, over = {}) => ({ id, phase: { kind, why: "" }, thread: null, addedAt: 1, ...over });
   const groups = itemGroups([item("a", "landed"), item("b", "queued", { thread: "th-1" }), item("c", "held")]);
   assert.deepEqual(groups.map((g) => [g.key, g.items.map((i) => i.id)]), [["held", ["c"]], ["queued", ["b"]], ["done", ["a"]]]);
+  assert.deepEqual(openItems([item("a", "landed"), item("b", "queued"), item("c", "held"), item("d", "cancelled")]).map((i) => i.id), ["b", "c"]);
   assert.equal(unstarted(item("c", "held")), true);
   assert.equal(unstarted(item("b", "queued", { thread: "th-1" })), false);
   assert.equal(unstarted(item("a", "cancelled")), false);
