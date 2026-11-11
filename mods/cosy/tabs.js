@@ -7,12 +7,16 @@
 import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, ScrollHandle } from "gpui-base";
 import { spaces, panes, run, window, knownAgents } from "herdr";
-import { look, alpha, stop, programIcon, ICON, SERIF } from "./look.js";
+import { look, alpha, stop, programIcon, ART, ICON, SERIF } from "./look.js";
 import { openMenu } from "./menu.js";
+
+// The grain strip's shape (art/make.sh): 2800 x 112.
+const GRAIN = 2800 / 112;
 
 export default class Tabs {
   init(_p, cx) {
     this.pressed = null;
+    this.size = { width: 1200, height: 56 };
     this.scroll = ScrollHandle.new();
     // The agents installed here, for the new tab card: asked once, up front,
     // so the card opens at its full size.
@@ -86,6 +90,17 @@ export default class Tabs {
       .tooltip(tip).on_mouse_down("left", stop).on_click(action).children(content);
   }
 
+  // Half the beam's grain, from its own end: the strip from the left, its
+  // mirror from the right (art/make.sh), each rounded at the end it starts
+  // from and cut where they meet. Inside the layout's 1px border.
+  wood(side) {
+    const { width, height } = this.size;
+    const half = (width - 2) / 2;
+    return div().absolute().top(1).left(side === "left" ? 1 : 1 + half).w(half).h(height - 2).overflow_hidden()
+      .child(image(`${ART}/${side === "left" ? "beam" : "beam-r"}.jpg`).absolute().top(0)[side](0)
+        .w((height - 2) * GRAIN).h(height - 2).rounded(12));
+  }
+
   render() {
     this.navigation?.observe();
     const L = look();
@@ -97,7 +112,9 @@ export default class Tabs {
       if (active >= 0) this.scroll.scroll_to_item(active);
     }
     const w = window();
-    return h_flex().id("beam").size_full().min_w(0).pl(14).pr(12).gap(10).items_center()
+    return h_flex().id("beam").relative().size_full().min_w(0).pl(14).pr(12).gap(10).items_center()
+      .on_size_change((size, cx) => { this.size = size; cx.notify(); })
+      .child(this.wood("left")).child(this.wood("right"))
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel((e) => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
       .child(div().id("menu-card").flex_none().h(27).px(11).flex().items_center().rounded(3).cursor_pointer()
