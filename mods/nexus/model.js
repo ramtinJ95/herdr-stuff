@@ -188,12 +188,16 @@ export function strayMachines(added, listed, open) {
 }
 
 /**
- * The terminal of a Claude worker thread's worker on its pylon, such as `t1`: its running Claude Code session. Null
- * for a thread with no worker, or one whose session is not running.
+ * The terminal of a Claude worker thread's worker on its pylon, such as `t1`: the running Claude Code session whose
+ * `harnessSessionId` is the worker's `claudeWorker.session`. A control plane older than 0.87.0 names no session, so
+ * there it is the first running Claude Code session. Null for a thread with no worker, or one whose session is not
+ * running.
  */
 export function workerTerminal(detail) {
-  if (!detail.claudeWorker) return null;
-  return detail.sessions.find((s) => s.state === "running" && s.harness === "claude-code")?.id ?? null;
+  const worker = detail.claudeWorker;
+  if (!worker) return null;
+  const own = (s) => worker.session === undefined || s.harnessSessionId === worker.session;
+  return detail.sessions.find((s) => s.state === "running" && s.harness === "claude-code" && own(s))?.id ?? null;
 }
 
 /**

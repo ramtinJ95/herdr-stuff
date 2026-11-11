@@ -123,6 +123,15 @@ test("the worker's terminal is a Claude worker thread's running Claude Code sess
   assert.equal(workerTerminal(detail([session("t1", "claude-code")], null)), null);
 });
 
+test("the worker's terminal is the Claude Code session the control plane names, among several", () => {
+  const session = (id, harnessSessionId, state = "running") => ({ id, harness: "claude-code", harnessSessionId, state });
+  const worker = (session) => ({ claudeWorker: { model: null, state: "started", session } });
+  const sessions = [session("t1", "side"), session("t3", "own")];
+  assert.equal(workerTerminal({ ...worker("own"), sessions }), "t3");
+  assert.equal(workerTerminal({ ...worker("gone"), sessions }), null, "the worker's session runs in no terminal");
+  assert.equal(workerTerminal({ ...worker(null), sessions }), null, "the worker has not launched");
+});
+
 test("showing a machine gives each unshown terminal a tab, the worker's last, and focuses a worker already shown", () => {
   const live = ["m/t1", "m/t2", "m/t3"];
   assert.deepEqual(showSteps(live, new Set(["m/t3"]), "m/t1"), [
