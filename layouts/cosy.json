@@ -7,6 +7,18 @@
     16
   ],
   "theme": "cosy",
+  "colors": {
+    "foreground": "#e9dcc3",
+    "canvas": "#120d0b",
+    "chrome": "#1a1310",
+    "surface": "#211915",
+    "popover": "#231a15",
+    "raised": "#2d2119",
+    "muted": "#bcaa8f",
+    "dim": "#8d7b67",
+    "idle": "#8d7b67",
+    "unknown": "#8d7b67"
+  },
   "toast": "cosy",
   "preview": "layouts/cosy.png",
   "background": {
