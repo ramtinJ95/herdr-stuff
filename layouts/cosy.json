@@ -90,13 +90,7 @@
           "size": {
             "px": 56
           },
-          "background": {
-            "gradient": [
-              "#3a2618",
-              "#1c120c"
-            ],
-            "angle": 180
-          },
+          "background": "#352213",
           "radius": 13,
           "border": {
             "width": 1,
