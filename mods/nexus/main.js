@@ -474,7 +474,7 @@ export default class Nexus extends View {
   /** Archives the thread and removes the machine Attach added for its pylon. */
   archive(cx, id) {
     this.act(cx, "Archiving", async () => {
-      await this.post(`/v1/threads/${id}/archive`);
+      await this.post(`/v1/threads/${id}/archive`, {});
       await reconcileMachines(new Set(this.rows.map((r) => r.id).filter((t) => t !== id)));
     });
   }
