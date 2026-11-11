@@ -62,7 +62,9 @@ export default class Shelf {
     const L = look();
     const W = this.width;
     const full = W - 32;
-    const top = W * IVY - 62;
+    // The heading sits a book's height up into the plant's shelf, so the
+    // stack holds one more book before the cups give up room.
+    const top = W * IVY - 62 - (BOOK + 4);
     const all = spaces();
     // A long stack scrolls in under half the shelf, so the cups keep their room.
     const stack = Math.min(all.length * (BOOK + 4) + 8, Math.max(2 * (BOOK + 4) + 8, (this.height - top - 40 - W * TABLE) * 0.45));
