@@ -8,7 +8,7 @@ A [Herdr app](https://herdr.dev) mod with much of the dashboard beside your term
   - its open questions, answered in place;
   - its review, with Land, Review again and Cancel;
   - its pull requests and changes;
-  - messaging, steering, Stop, Retry, Archive, marking seen, and attaching.
+  - messaging, steering, Stop, Retry, Archive, marking seen, and Attach, which shows the pylon's terminals in the app.
 - **Other pages:** pipeline items with Approve and Cancel, the cluster's release and nodes, and token usage.
 
 It uses the control plane that `nexus connect`, the [Nexus](https://github.com/ramtinJ95/nexus) CLI, saved in `~/.config/nexus/cli.json`, so connect the CLI first. A device that reaches Nexus through a SOCKS proxy cannot use it yet.
@@ -33,4 +33,28 @@ The app does not hot-reload a linked mod: after a change, close and reopen the p
 - **Seen:** a shown reply is marked seen with its own `lastReplyAt`, as the dashboard does. This happens only while the window is active and the panel is on screen: the window, or a docked copy in the shown tab.
 - **Changes:** reading a thread's changes wakes a paused pylon, so they load only when you press Load changes.
 - **Confirmations:** Land, Archive and Cancel take a second press within 6 seconds. A Land that waives holds names them first.
+- **Commands:** `nexus.attach` and `nexus.archive` press the shown thread's Attach and Archive, for a key in `keys.json` or `herdr-app do nexus.archive`. Archive still takes a second command within 6 seconds.
 - **Notifications:** they post only while a copy of the panel runs.
+
+## Attach makes the pylon a machine
+
+Attach shows a thread's pylon terminals in the app, as native panes, by adding the pylon as a Herdr Core machine named after the thread:
+
+```sh
+hc machine add --via 'nexus exec <thread>' --name <thread>
+```
+
+1. If the pylon does not run, Attach wakes it with `POST /v1/threads/<id>/activity`, as `nexus wake` does, because `nexus exec` never wakes a pylon. The status bar shows the pylon's state while it waits, for up to 120 seconds. Attach fails for an archived thread or a failed pylon.
+2. If a machine of that name exists, Attach uses it as it is. Otherwise it adds one.
+3. Once the app shows the machine, Attach selects the machine's space, or makes one named after the thread. A pylon's terminal can have a pane only in a space on its own machine, so the space holds them. Each terminal without a pane gets a tab, and the worker's Claude Code terminal comes last, so its tab is the one shown.
+
+A failure at any step shows in the status bar. An `hc` older than `hc machine` fails with a message to run `hc update`.
+
+The machine is not added with `--temp`, because Herdr leaves temporary machines out of the app.
+
+The panel removes only the machines it added. It records their names in its shared state, `nexus.machines`, since a machine you add by hand, as the Nexus docs show, looks the same. It removes a recorded machine with `hc machine rm <thread>` in these cases:
+
+- You archive the thread from the panel.
+- On the minute's full read, the thread is no longer among the open threads, as after an archive or delete from the CLI or the dashboard.
+
+A recorded machine that you removed, or replaced with one that is not reached through `nexus exec <thread>`, is dropped from the record and left alone. Removing a machine removes its space from the app, while its terminals keep running in the pylon. Typing into those terminals is not human activity in Nexus, except a prompt you submit to Claude Code. So the pylon still pauses 20 minutes after the last human activity while the app shows it, and the app reconnects once the pylon runs again.

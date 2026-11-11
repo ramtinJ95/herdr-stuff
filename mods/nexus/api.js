@@ -17,8 +17,13 @@ export async function connect() {
   return { url: config.url.replace(/\/+$/, "") };
 }
 
+/** The API refuses a state change without a JSON content type, with or without a body, as the CLI sends it. */
 export async function call(conn, method, path, body) {
-  const options = body === undefined ? { method } : { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
+  const options = {
+    method,
+    ...(method === "GET" ? {} : { headers: { "content-type": "application/json" } }),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  };
   const r = await fetch(`${conn.url}${path}`, options);
   const text = await r.text();
   let data = null;

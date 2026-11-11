@@ -3,9 +3,10 @@
 // Docked as a pane (pane.split {mod: "nexus"}) or as a floating window (mod.open:nexus); each can switch to the other.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextareaState } from "gpui-base";
-import { closeOverlay, exec, focused, hc, nextCommand, notify, panes, props, run, setShared, shared, theme, window as appWindow } from "herdr";
+import { closeOverlay, exec, focused, nextCommand, notify, panes, props, run, setShared, shared, theme, window as appWindow } from "herdr";
 import { call, connect, follow, latestCursor, requestId } from "./api.js";
-import { ago, arrivalKey, arrivals, askBody, attentionLabel, attentionOf, changesThreads, countOpen, inFlight, needsYou, openItems, openQuestions, pick } from "./model.js";
+import { ago, arrivalKey, arrivals, askBody, attentionLabel, attentionOf, changesThreads, countOpen, inFlight, needsYou, openItems, openQuestions, pick, workerTerminal } from "./model.js";
+import { addMachine, reconcileMachines, showMachine } from "./machines.js";
 import { applyClaude, applyHarness, emptyLive } from "./transcript.js";
 import { kit } from "./ui.js";
 import { pageBlocks, threadView } from "./thread.js";
@@ -16,6 +17,8 @@ const pollMs = 3_000;
 const fullRefreshMs = 60_000;
 /** A press that asks again forgets the first press after this long. */
 const confirmMs = 6_000;
+/** How long Attach waits for a paused pylon to run, as `nexus attach` does. */
+const wakeMs = 120_000;
 const viewKey = "nexus.view";
 const notifiedKey = "nexus.notified";
 const pageTabs = ["items", "cluster", "usage"];
@@ -40,6 +43,7 @@ export default class Nexus extends View {
     this.refreshAgain = false;
     this.polling = false;
     this.sending = false;
+    this.attaching = null;
     this.worker = "claude";
     this.project = null;
     this.message = TextareaState.new({ placeholder: "Message the agent", rows: 3 });
@@ -81,7 +85,9 @@ export default class Nexus extends View {
     }));
     cx.spawn(async (cx) => {
       for (;;) {
-        if ((await nextCommand()) === "focus") this.handle.focus();
+        const command = await nextCommand();
+        if (command === "focus") this.handle.focus();
+        else if (command === "attach" || command === "archive") this.shownThreadCommand(cx, command);
         cx.notify();
       }
     });
@@ -137,7 +143,10 @@ export default class Nexus extends View {
     });
   }
 
-  /** Refetches the open threads, and the projects when `all`; one at a time, with a request made meanwhile run after. */
+  /**
+   * Refetches the open threads, and the projects when `all`; one at a time, with a request made meanwhile run after.
+   * With `all`, it also removes the machines Attach added for threads no longer open, such as one archived elsewhere.
+   */
   async refresh(cx, all) {
     if (this.conn === null) return;
     if (this.refreshing) { this.refreshAgain = true; return; }
@@ -156,6 +165,7 @@ export default class Nexus extends View {
         this.project ??= projects[0]?.id ?? null;
         if (this.view.thread !== null) await this.loadDetail(cx, this.view.thread);
       } while (this.refreshAgain);
+      if (all) await reconcileMachines(new Set(this.rows.map((r) => r.id)));
       this.syncedAt = Date.now();
       if (this.status.level === "error" || this.status.startup) this.status = { level: "info", text: "" };
       cx.notify();
@@ -446,17 +456,82 @@ export default class Nexus extends View {
     });
   }
 
-  /** `nexus attach` in a core terminal, peeked over the tab: keep it as a tab from there, or close it. */
+  /**
+   * `nexus.attach` and `nexus.archive`, for keys.json and `herdr-app do`: the shown thread's Attach and Archive buttons,
+   * Archive with the same second press within 6 seconds.
+   */
+  shownThreadCommand(cx, command) {
+    const d = this.detail;
+    if (d === null || d.thread.id !== this.view.thread) return this.fail(cx, new Error(`nexus.${command} needs a thread shown`));
+    const id = d.thread.id;
+    if (d.thread.status !== "active") return this.fail(cx, new Error(`nexus.${command}: ${id} is ${d.thread.status}`));
+    if (command === "attach") {
+      this.attach(cx, id);
+    } else if (this.confirm === `archive:${id}`) this.archive(cx, id);
+    else this.ask(cx, `archive:${id}`);
+  }
+
+  /** Archives the thread and removes the machine Attach added for its pylon. */
+  archive(cx, id) {
+    this.act(cx, "Archiving", async () => {
+      await this.post(`/v1/threads/${id}/archive`);
+      await reconcileMachines(new Set(this.rows.map((r) => r.id).filter((t) => t !== id)));
+    });
+  }
+
+  /**
+   * Makes the thread's pylon a Herdr Core machine and shows its terminals, the worker's in front. The machine goes
+   * through `nexus exec`, which never wakes a pylon, so a paused one is woken first.
+   */
   attach(cx, id) {
+    if (this.attaching !== null) return;
+    this.attaching = id;
+    cx.notify();
     cx.spawn(async (cx) => {
       try {
-        const r = await hc(["run", "--bg", "--json", "--no-parent", "--rm", "nexus", "attach", id]);
-        if (r.code !== 0) throw new Error(`hc run nexus attach failed: ${(r.stderr || r.stdout).trim()}`);
-        run("terminal.peek", { terminal: JSON.parse(r.stdout).address });
+        const detail = await this.runningPylon(cx, id);
+        this.status = { level: "info", text: `Adding the pylon of ${id} as a machine…` };
+        cx.notify();
+        const name = await addMachine(id);
+        this.status = { level: "info", text: `Waiting for Herdr to show ${name}…` };
+        cx.notify();
+        await showMachine(cx, name, workerTerminal(detail), detail.thread.title);
+        this.status = { level: "success", text: `Attached: ${name}` };
       } catch (e) {
         this.fail(cx, e);
+      } finally {
+        this.attaching = null;
+        cx.notify();
       }
     });
+  }
+
+  /**
+   * The thread's detail once its pylon runs and its sessions are back, waking it as a person's request does, and
+   * saying meanwhile what the pylon is doing. Throws for a thread not open, a failed pylon, or one still not running
+   * after wakeMs.
+   */
+  async runningPylon(cx, id) {
+    const path = `/v1/threads/${encodeURIComponent(id)}`;
+    const ready = (d) => d.pylon.actualState === "running" && d.sessions.every((s) => s.state !== "paused");
+    const start = Date.now();
+    let woke = false;
+    for (;;) {
+      const d = await call(this.conn, "GET", path);
+      if (d.thread.status !== "active") throw new Error(`${id} is ${d.thread.status}, so its pylon does not run: unarchive it to attach`);
+      if (ready(d)) return d;
+      if (d.pylon.failed) throw new Error(`The pylon of ${id} failed: ${d.pylon.failed.message ?? JSON.stringify(d.pylon.failed)}. Retry the pylon, then attach`);
+      const waited = Date.now() - start;
+      const state = d.pylon.actualState === "running" ? "running, its sessions not back yet" : d.pylon.actualState;
+      if (waited > wakeMs) throw new Error(`The pylon of ${id} is still ${state} after ${wakeMs / 1000} s`);
+      if (!woke) {
+        await this.post(`${path}/activity`, { kind: "human" });
+        woke = true;
+      }
+      this.status = { level: "info", text: `Waking the pylon of ${id}: ${state}, ${Math.round(waited / 1000)} s…` };
+      cx.notify();
+      await cx.sleep(2_000);
+    }
   }
 
   openUrl(url) {

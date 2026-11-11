@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { arrivalKey, arrivals, askBody, attentionOf, byProject, changesThreads, inFlight, itemGroups, landOffer, openItems, needsYou, openQuestions, pick, unstarted } from "./model.js";
+import { arrivalKey, arrivals, askBody, attentionOf, byProject, changesThreads, inFlight, itemGroups, landOffer, machineName, machineVia, openItems, needsYou, openQuestions, pick, showSteps, strayMachines, unstarted, workerTerminal } from "./model.js";
 
 const row = (id, over = {}) => ({
   id, title: id, project: "p", status: "active", attention: null, working: false, createdAt: 1,
@@ -91,4 +91,44 @@ test("items group by phase in pipeline order, finished ones last; only an unstar
   assert.equal(unstarted(item("c", "held")), true);
   assert.equal(unstarted(item("b", "queued", { thread: "th-1" })), false);
   assert.equal(unstarted(item("a", "cancelled")), false);
+});
+
+test("a thread's machine is named after the thread, and only a thread ID makes one", () => {
+  assert.equal(machineName("th-fece39854aa2"), "th-fece39854aa2");
+  assert.equal(machineVia("th-fece39854aa2"), "nexus exec th-fece39854aa2");
+  assert.throws(() => machineName("th-1; rm -rf ~"), /not a thread ID/);
+  assert.throws(() => machineName("vps"), /not a thread ID/);
+});
+
+test("the machines to remove are only those the panel added, for threads no longer open, still as it made them", () => {
+  const made = (name, over = {}) => ({ name, via: true, target: machineVia(name), temporary: false, ...over });
+  const open = new Set(["th-000000000001"]);
+  const added = ["th-000000000001", "th-000000000002", "th-000000000003", "th-000000000004"];
+  const listed = [
+    made("th-000000000001"),
+    made("th-000000000002"),
+    made("th-000000000004", { via: false, target: "th-000000000004" }),
+    made("th-00000000000a"),
+    { name: "vps", via: false, target: "vps" },
+  ];
+  assert.deepEqual(strayMachines(added, listed, open), { remove: ["th-000000000002"], forget: ["th-000000000003", "th-000000000004"] });
+  assert.deepEqual(strayMachines([], listed, new Set()), { remove: [], forget: [] });
+});
+
+test("the worker's terminal is a Claude worker thread's running Claude Code session", () => {
+  const session = (id, harness, state = "running") => ({ id, harness, state });
+  const detail = (sessions, claudeWorker = { model: null, state: "started" }) => ({ claudeWorker, sessions });
+  assert.equal(workerTerminal(detail([session("t2", "shell"), session("t1", "claude-code")])), "t1");
+  assert.equal(workerTerminal(detail([session("t1", "claude-code", "paused")])), null);
+  assert.equal(workerTerminal(detail([session("t1", "claude-code")], null)), null);
+});
+
+test("showing a machine gives each unshown terminal a tab, the worker's last, and focuses a worker already shown", () => {
+  const live = ["m/t1", "m/t2", "m/t3"];
+  assert.deepEqual(showSteps(live, new Set(["m/t3"]), "m/t1"), [
+    ["terminal.keep", { terminal: "m/t2", place: "tab" }],
+    ["terminal.keep", { terminal: "m/t1", place: "tab" }],
+  ]);
+  assert.deepEqual(showSteps(live, new Set(["m/t1", "m/t2", "m/t3"]), "m/t1"), [["pane.focus", { terminal: "m/t1" }]]);
+  assert.deepEqual(showSteps(live, new Set(), null).map(([, a]) => a.terminal), ["m/t1", "m/t2", "m/t3"]);
 });

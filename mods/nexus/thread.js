@@ -22,7 +22,7 @@ export function threadView(app, ui, now) {
     button("back", "← Back", (cx) => app.show(cx, { thread: null })),
     div().flex_1(),
     button("dash", "Dashboard", () => app.openUrl(`${app.conn.url}/threads/${id}`)),
-    button("attach", "Attach", (cx) => app.attach(cx, id), { disabled: !open }),
+    button("attach", app.attaching === id ? "Attaching…" : "Attach", (cx) => app.attach(cx, id), { disabled: !open || app.attaching !== null }),
   );
 
   const actions = row(
@@ -34,7 +34,7 @@ export function threadView(app, ui, now) {
     ...d.attention === "failed" && !d.pylon.failed ? [button("retry-turn", "Retry the turn", (cx) => app.act(cx, "Retrying", () => app.post(`/v1/threads/${id}/retry`)))] : [],
     open
       ? confirming(`archive:${id}`)
-        ? button("archive", "Archive: press again", (cx) => app.act(cx, "Archiving", () => app.post(`/v1/threads/${id}/archive`)), { danger: true })
+        ? button("archive", "Archive: press again", (cx) => app.archive(cx, id), { danger: true })
         : button("archive", "Archive", (cx) => app.ask(cx, `archive:${id}`))
       : th.status === "archived" ? button("unarchive", "Unarchive", (cx) => app.act(cx, "Unarchiving", () => app.post(`/v1/threads/${id}/unarchive`))) : null,
   );

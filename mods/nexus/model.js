@@ -1,4 +1,4 @@
-// What the panel shows, from the control plane's thread rows. Pure: no Herdr imports, so Node tests it.
+// What the panel shows, from the control plane's thread rows, and the Core machines Attach makes. Pure: no Herdr imports, so Node tests it.
 //
 // A thread row's `attention` is the control plane's own ranking (docs/cli.md, "Attention and shared seen state"),
 // so the panel groups by it rather than re-deriving the dashboard's server-side cards.
@@ -162,4 +162,46 @@ export function tokens(n) {
     }
   }
   return String(n);
+}
+
+/**
+ * The name of the Core machine Attach makes of a thread's pylon: the thread's ID. The name goes into `--via`'s sh
+ * line, so anything but a thread ID is refused.
+ */
+export function machineName(thread) {
+  if (!/^th-[0-9a-f]{12}$/.test(thread)) throw new Error(`${thread} is not a thread ID, so it names no machine`);
+  return thread;
+}
+
+/** What Herdr Core reaches a thread's machine through, as ssh: `nexus exec`, which never wakes a pylon. */
+export const machineVia = (name) => `nexus exec ${name}`;
+
+/**
+ * The machines the panel added (`added`, names) whose thread is no longer open: `remove` those `hc machine ls`
+ * (`listed`) still has as the panel made them, and `forget` the rest, gone already or replaced by one of the
+ * person's own, which stays.
+ */
+export function strayMachines(added, listed, open) {
+  const stray = added.filter((name) => !open.has(name));
+  const ours = (name) => listed.some((m) => m.name === name && m.via === true && m.target === machineVia(name));
+  return { remove: stray.filter(ours), forget: stray.filter((name) => !ours(name)) };
+}
+
+/**
+ * The terminal of a Claude worker thread's worker on its pylon, such as `t1`: its running Claude Code session. Null
+ * for a thread with no worker, or one whose session is not running.
+ */
+export function workerTerminal(detail) {
+  if (!detail.claudeWorker) return null;
+  return detail.sessions.find((s) => s.state === "running" && s.harness === "claude-code")?.id ?? null;
+}
+
+/**
+ * The app commands that show a machine's `live` terminals in its space, once it is shown: a tab for each one no pane
+ * shows (`shown`), the worker's last so its tab is the one left shown, or a focus on the worker's pane if it has one.
+ */
+export function showSteps(live, shown, worker) {
+  const steps = live.filter((t) => t !== worker && !shown.has(t)).map((terminal) => ["terminal.keep", { terminal, place: "tab" }]);
+  if (worker !== null && live.includes(worker)) steps.push(shown.has(worker) ? ["pane.focus", { terminal: worker }] : ["terminal.keep", { terminal: worker, place: "tab" }]);
+  return steps;
 }
