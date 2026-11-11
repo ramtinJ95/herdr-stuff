@@ -129,7 +129,7 @@
                         "role": "pane"
                       }
                     },
-                    "height": 34,
+                    "height": 1,
                     "position": "top",
                     "reveal": "always"
                   }

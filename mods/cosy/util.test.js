@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { keyLabel, ago, folder, mix, alpha, hash } from "./util.js";
+import { keyLabel, ago, mix, alpha, hash } from "./util.js";
 
 test("keyLabel reads bindings as people do", () => {
   assert.equal(keyLabel("ctrl-shift-t"), "Ctrl+Shift+T");
@@ -20,13 +20,6 @@ test("ago counts minutes, hours, days", () => {
   assert.equal(ago(now - 4 * 60_000, now), "4m");
   assert.equal(ago(now - 3 * 3_600_000, now), "3h");
   assert.equal(ago(now - 50 * 3_600_000, now), "2d");
-});
-
-test("folder shows home as ~", () => {
-  assert.equal(folder("/home/me", "/home/me"), "~");
-  assert.equal(folder("/home/me/work", "/home/me"), "~/work");
-  assert.equal(folder("/home/merry", "/home/me"), "/home/merry");
-  assert.equal(folder(null, "/home/me"), "");
 });
 
 test("mix and alpha make colors", () => {

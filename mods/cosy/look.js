@@ -7,7 +7,7 @@ import { div } from "gpui-kit";
 import { theme, keys } from "herdr";
 import { keyLabel } from "./util.js";
 
-export { mix, alpha, hash, ago, folder } from "./util.js";
+export { mix, alpha, hash, ago } from "./util.js";
 
 /** Instrument Serif (fonts/, SIL OFL): titles and the menu. */
 export const SERIF = "Instrument Serif";

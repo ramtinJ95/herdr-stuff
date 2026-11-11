@@ -42,9 +42,3 @@ export function ago(at, now = Date.now()) {
   if (m < 60 * 24) return `${Math.floor(m / 60)}h`;
   return `${Math.floor(m / 1440)}d`;
 }
-
-/** A terminal's folder with home as "~". */
-export function folder(cwd, home) {
-  if (!cwd) return "";
-  return cwd === home ? "~" : cwd.startsWith(home + "/") ? "~" + cwd.slice(home.length) : cwd;
-}
