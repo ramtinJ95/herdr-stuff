@@ -52,6 +52,8 @@ A failure at any step shows in the status bar. An `hc` older than `hc machine` f
 
 The machine is not added with `--temp`, because Herdr leaves temporary machines out of the app.
 
+While the app window is active and shows a space on an open thread's machine, the panel posts human activity for that thread every 4 minutes, as `nexus wake` does. A pylon you watch then does not pause for idleness, and a paused one wakes. A connection through `nexus exec` alone counts as no one, so this needs a copy of the panel running, docked or open, and stops once you switch spaces, leave the window, or close the panel.
+
 The panel removes only the machines it added. It records their names in its shared state, `nexus.machines`, since a machine you add by hand, as the Nexus docs show, looks the same. It removes a recorded machine with `hc machine rm <thread>` in these cases:
 
 - You archive the thread from the panel.

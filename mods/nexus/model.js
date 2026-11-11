@@ -205,3 +205,13 @@ export function showSteps(live, shown, worker) {
   if (worker !== null && live.includes(worker)) steps.push(shown.has(worker) ? ["pane.focus", { terminal: worker }] : ["terminal.keep", { terminal: worker, place: "tab" }]);
   return steps;
 }
+
+/**
+ * The thread to post human activity for now, or null: the thread whose machine the shown space is on (`shownMachine`,
+ * a machine name or null), while it is open (`open`, thread IDs), once `everyMs` have passed since the last post for
+ * it (`lastAt`, ms or undefined). A space on a machine named for no open thread, or on this computer, posts nothing.
+ */
+export function presenceDue(shownMachine, open, lastAt, now, everyMs) {
+  if (shownMachine === null || !open.has(shownMachine)) return null;
+  return lastAt === undefined || now - lastAt >= everyMs ? shownMachine : null;
+}

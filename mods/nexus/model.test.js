@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { arrivalKey, arrivals, askBody, attentionOf, byProject, changesThreads, inFlight, itemGroups, landOffer, machineName, machineVia, openItems, needsYou, openQuestions, pick, showSteps, strayMachines, unstarted, workerTerminal } from "./model.js";
+import { arrivalKey, arrivals, askBody, attentionOf, byProject, changesThreads, inFlight, itemGroups, landOffer, machineName, machineVia, openItems, needsYou, openQuestions, pick, showSteps, strayMachines, unstarted, workerTerminal, presenceDue } from "./model.js";
 
 const row = (id, over = {}) => ({
   id, title: id, project: "p", status: "active", attention: null, working: false, createdAt: 1,
@@ -131,4 +131,13 @@ test("showing a machine gives each unshown terminal a tab, the worker's last, an
   ]);
   assert.deepEqual(showSteps(live, new Set(["m/t1", "m/t2", "m/t3"]), "m/t1"), [["pane.focus", { terminal: "m/t1" }]]);
   assert.deepEqual(showSteps(live, new Set(), null).map(([, a]) => a.terminal), ["m/t1", "m/t2", "m/t3"]);
+});
+
+test("presenceDue posts for the shown open thread's machine, at most once per interval", () => {
+  const open = new Set(["th-000000000001"]);
+  assert.equal(presenceDue("th-000000000001", open, undefined, 1_000, 240_000), "th-000000000001");
+  assert.equal(presenceDue("th-000000000001", open, 1_000, 200_000, 240_000), null);
+  assert.equal(presenceDue("th-000000000001", open, 1_000, 241_000, 240_000), "th-000000000001");
+  assert.equal(presenceDue("th-000000000002", open, undefined, 1_000, 240_000), null, "a thread no longer open");
+  assert.equal(presenceDue(null, open, undefined, 1_000, 240_000), null, "this computer's space");
 });
