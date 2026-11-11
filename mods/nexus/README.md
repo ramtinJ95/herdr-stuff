@@ -33,6 +33,7 @@ The app does not hot-reload a linked mod: after a change, close and reopen the p
 - **Seen:** a shown reply is marked seen with its own `lastReplyAt`, as the dashboard does. This happens only while the window is active and the panel is on screen: the window, or a docked copy in the shown tab.
 - **Changes:** reading a thread's changes wakes a paused pylon, so they load only when you press Load changes.
 - **Confirmations:** Land, Archive and Cancel take a second press within 6 seconds. A Land that waives holds names them first.
+- **Commands:** `nexus.attach` and `nexus.archive` press the shown thread's Attach and Archive, for a key in `keys.json` or `herdr-app do nexus.archive`. Archive still takes a second command within 6 seconds.
 - **Notifications:** they post only while a copy of the panel runs.
 
 ## Attach makes the pylon a machine

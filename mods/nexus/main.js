@@ -85,7 +85,9 @@ export default class Nexus extends View {
     }));
     cx.spawn(async (cx) => {
       for (;;) {
-        if ((await nextCommand()) === "focus") this.handle.focus();
+        const command = await nextCommand();
+        if (command === "focus") this.handle.focus();
+        else if (command === "attach" || command === "archive") this.shownThreadCommand(cx, command);
         cx.notify();
       }
     });
@@ -452,6 +454,21 @@ export default class Nexus extends View {
       await this.post(`/v1/threads/${encodeURIComponent(id)}/messages`, { text, requestId: requestId("msg"), mode });
       this.message.set_value("");
     });
+  }
+
+  /**
+   * `nexus.attach` and `nexus.archive`, for keys.json and `herdr-app do`: the shown thread's Attach and Archive buttons,
+   * Archive with the same second press within 6 seconds.
+   */
+  shownThreadCommand(cx, command) {
+    const d = this.detail;
+    if (d === null || d.thread.id !== this.view.thread) return this.fail(cx, new Error(`nexus.${command} needs a thread shown`));
+    const id = d.thread.id;
+    if (d.thread.status !== "active") return this.fail(cx, new Error(`nexus.${command}: ${id} is ${d.thread.status}`));
+    if (command === "attach") {
+      this.attach(cx, id);
+    } else if (this.confirm === `archive:${id}`) this.archive(cx, id);
+    else this.ask(cx, `archive:${id}`);
   }
 
   /** Archives the thread and removes the machine Attach added for its pylon. */
