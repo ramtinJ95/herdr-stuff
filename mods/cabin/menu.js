@@ -14,6 +14,12 @@ function items() {
   const tab = space?.tabs.find((c) => c.active);
   const panel = (child) => () => { run("layout.select", { stack: "panel-body", child }); run("layout.show", { id: "panel" }); };
   const [name, fps] = motion();
+  // Leaving goes where the café's own layout.switch key goes (keys.json's
+  // layout:cabin); without one, on to the next layout.
+  const away = keys().find((k) => k.section === "layout:cabin" && k.action.startsWith("layout.switch:"))?.action;
+  const leave = away
+    ? [`Back to ${away.slice("layout.switch:".length)}`, () => run("layout.switch", { name: away.slice("layout.switch:".length) }), away]
+    : ["Next layout", () => run("layout.switch"), "layout.switch"];
   return [
     ["ORDERS", [
       ["New tab or agent", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 }), "tab.new"],
@@ -30,7 +36,7 @@ function items() {
       ["Changes", panel("changes")],
       ["Fold the wall", toggleSidebar, "layout.toggle"],
       [`Motion: ${name}${fps ? ` (${fps} fps)` : ""}`, cycleMotion, "cabin.motion", true],
-      ["Next layout", () => run("layout.switch"), "layout.switch"],
+      leave,
       ["All commands", () => run("app.palette"), "app.palette"],
       ["Settings", () => run("app.settings"), "app.settings"],
     ]],
