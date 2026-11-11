@@ -1,0 +1,8 @@
+{
+  "layout:cosy": {
+    "ctrl-f b": "cosy.tabs",
+    "ctrl-f a": "cosy.agents",
+    "ctrl-f tab": "cosy.back",
+    "ctrl-f m": "mod.open:cosy"
+  }
+}

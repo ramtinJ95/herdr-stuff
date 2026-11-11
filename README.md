@@ -6,6 +6,7 @@ Mods for the [Herdr app](https://herdr.dev), one folder each under `mods/`.
 | --- | --- |
 | [nexus](mods/nexus) | Nexus threads beside your terminals: what waits on you, live conversations, answering questions, reviews and landing, pipeline items, the cluster and usage |
 | [cabin](mods/cabin) | A whole-window winter cabin café layout (`layouts/cabin.json`): agents as pixel pets on a rug by the fire, spaces on a chalkboard, panes as wooden windows, a counter of tabs below; every color from your theme |
+| [cosy](mods/cosy) | A whole-window lofi café layout (`layouts/cosy.json`) cut from one painting: terminals as the window onto a snowy street, tabs as pendant lamps, spaces as a stack of books with the agents as cups under them, a paper menu card with keys as prices |
 | [tuido](mods/tuido) | Your tuido todo lists in a floating window: complete, add, open in your editor, sort, archive and sync |
 
 ## Install

@@ -1,0 +1,146 @@
+{
+  "id": "root",
+  "type": "row",
+  "titlebar": "none",
+  "traffic_lights": [
+    14,
+    16
+  ],
+  "theme": "cosy",
+  "toast": "cosy",
+  "preview": "layouts/cosy.png",
+  "background": {
+    "image": "mods/cosy/art/room.jpg",
+    "fit": "cover"
+  },
+  "terminal_padding": [
+    12,
+    12
+  ],
+  "terminal_opacity": 0,
+  "padding": 10,
+  "resizable": false,
+  "children": [
+    {
+      "id": "sidebar",
+      "type": "column",
+      "size": {
+        "px": 300
+      },
+      "resizable": false,
+      "background": "#2a1e17",
+      "radius": 13,
+      "border": {
+        "width": 1,
+        "color": "#4a3324"
+      },
+      "children": [
+        {
+          "id": "shelf",
+          "type": "block",
+          "content": {
+            "mod": "cosy",
+            "props": {
+              "role": "shelf"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "lights",
+      "type": "block",
+      "size": {
+        "px": 24
+      },
+      "content": {
+        "mod": "cosy",
+        "props": {
+          "role": "lights"
+        }
+      }
+    },
+    {
+      "id": "work",
+      "type": "column",
+      "resizable": false,
+      "children": [
+        {
+          "id": "tabs",
+          "type": "block",
+          "window_drag": true,
+          "content": {
+            "mod": "cosy",
+            "props": {
+              "role": "tabs"
+            }
+          },
+          "size": {
+            "px": 56
+          },
+          "background": {
+            "gradient": [
+              "#3a2618",
+              "#1c120c"
+            ],
+            "angle": 180
+          },
+          "radius": 13,
+          "border": {
+            "width": 1,
+            "color": "#4a3324"
+          }
+        },
+        {
+          "id": "work-body",
+          "type": "row",
+          "gap": 0,
+          "background": {
+            "image": "mods/cosy/art/street.jpg",
+            "fit": "cover"
+          },
+          "border": {
+            "width": 7,
+            "color": "#4a3324"
+          },
+          "children": [
+            {
+              "id": "main",
+              "type": "block",
+              "content": {
+                "tab": "active",
+                "pane": {
+                  "gap": 0,
+                  "radius": 6,
+                  "background": "#2a1a10c2",
+                  "border": {
+                    "width": 3,
+                    "color": "#4a3324"
+                  },
+                  "focus": {
+                    "width": 3,
+                    "color": "#7f5a3b"
+                  },
+                  "lone": true,
+                  "header": {
+                    "content": {
+                      "mod": "cosy",
+                      "props": {
+                        "role": "pane"
+                      }
+                    },
+                    "height": 34,
+                    "position": "top",
+                    "reveal": "always"
+                  }
+                }
+              }
+            }
+          ],
+          "radius": 13
+        }
+      ],
+      "gap": 8
+    }
+  ]
+}
