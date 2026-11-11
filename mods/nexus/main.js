@@ -3,9 +3,9 @@
 // Docked as a pane (pane.split {mod: "nexus"}) or as a floating window (mod.open:nexus); each can switch to the other.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextareaState } from "gpui-base";
-import { closeOverlay, exec, focused, nextCommand, notify, panes, props, run, setShared, shared, theme, window as appWindow } from "herdr";
+import { closeOverlay, exec, focused, nextCommand, notify, panes, props, run, setShared, shared, spaces, theme, window as appWindow } from "herdr";
 import { call, connect, follow, latestCursor, requestId } from "./api.js";
-import { ago, arrivalKey, arrivals, askBody, attentionLabel, attentionOf, changesThreads, countOpen, inFlight, needsYou, openItems, openQuestions, pick, workerTerminal } from "./model.js";
+import { ago, arrivalKey, arrivals, askBody, attentionLabel, attentionOf, changesThreads, countOpen, inFlight, needsYou, openItems, openQuestions, pick, presenceDue, workerTerminal } from "./model.js";
 import { addMachine, reconcileMachines, showMachine } from "./machines.js";
 import { applyClaude, applyHarness, emptyLive } from "./transcript.js";
 import { kit } from "./ui.js";
@@ -19,6 +19,9 @@ const fullRefreshMs = 60_000;
 const confirmMs = 6_000;
 /** How long Attach waits for a paused pylon to run, as `nexus attach` does. */
 const wakeMs = 120_000;
+/** How often a shown thread machine counts as a person present: well inside the control plane's 20 human-idle minutes. */
+const presenceMs = 240_000;
+const presenceKey = "nexus.presence";
 const viewKey = "nexus.view";
 const notifiedKey = "nexus.notified";
 const pageTabs = ["items", "cluster", "usage"];
@@ -78,7 +81,7 @@ export default class Nexus extends View {
         this.fail(cx, e);
       }
     });
-    cx.timer.every(pollMs, (cx) => { this.poll(cx); this.autoSeen(cx); this.expireConfirm(cx); });
+    cx.timer.every(pollMs, (cx) => { this.poll(cx); this.autoSeen(cx); this.expireConfirm(cx); this.presence(cx); });
     cx.timer.every(fullRefreshMs, (cx) => cx.spawn(async (cx) => {
       await this.refresh(cx, true);
       await this.loadPages(cx, this.view.thread === null);
@@ -532,6 +535,28 @@ export default class Nexus extends View {
       cx.notify();
       await cx.sleep(2_000);
     }
+  }
+
+  /**
+   * Posts human activity for the thread whose machine space the active window shows, as `nexus wake` does, so a pylon
+   * a person watches in Herdr does not pause under them, and a paused one wakes. The shared record keeps the copies of
+   * the panel to one post per thread per presenceMs.
+   */
+  presence(cx) {
+    if (this.conn === null || !appWindow().active) return;
+    const shown = spaces().find((s) => s.active)?.machine ?? null;
+    const posted = /** @type {Record<string, number>} */ (shared(presenceKey) ?? {});
+    const now = Date.now();
+    const id = presenceDue(shown, new Set(this.rows.map((r) => r.id)), shown === null ? undefined : posted[shown], now, presenceMs);
+    if (id === null) return;
+    setShared(presenceKey, Object.fromEntries([...Object.entries(posted).filter(([, at]) => now - at < presenceMs), [id, now]]));
+    cx.spawn(async (cx) => {
+      try {
+        await this.post(`/v1/threads/${encodeURIComponent(id)}/activity`, { kind: "human" });
+      } catch (e) {
+        this.fail(cx, new Error(`Counting you present in ${id} failed: ${e instanceof Error ? e.message : e}`));
+      }
+    });
   }
 
   openUrl(url) {

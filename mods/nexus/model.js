@@ -188,12 +188,16 @@ export function strayMachines(added, listed, open) {
 }
 
 /**
- * The terminal of a Claude worker thread's worker on its pylon, such as `t1`: its running Claude Code session. Null
- * for a thread with no worker, or one whose session is not running.
+ * The terminal of a Claude worker thread's worker on its pylon, such as `t1`: the running Claude Code session whose
+ * `harnessSessionId` is the worker's `claudeWorker.session`. A control plane older than 0.87.0 names no session, so
+ * there it is the first running Claude Code session. Null for a thread with no worker, or one whose session is not
+ * running.
  */
 export function workerTerminal(detail) {
-  if (!detail.claudeWorker) return null;
-  return detail.sessions.find((s) => s.state === "running" && s.harness === "claude-code")?.id ?? null;
+  const worker = detail.claudeWorker;
+  if (!worker) return null;
+  const own = (s) => worker.session === undefined || s.harnessSessionId === worker.session;
+  return detail.sessions.find((s) => s.state === "running" && s.harness === "claude-code" && own(s))?.id ?? null;
 }
 
 /**
@@ -204,4 +208,14 @@ export function showSteps(live, shown, worker) {
   const steps = live.filter((t) => t !== worker && !shown.has(t)).map((terminal) => ["terminal.keep", { terminal, place: "tab" }]);
   if (worker !== null && live.includes(worker)) steps.push(shown.has(worker) ? ["pane.focus", { terminal: worker }] : ["terminal.keep", { terminal: worker, place: "tab" }]);
   return steps;
+}
+
+/**
+ * The thread to post human activity for now, or null: the thread whose machine the shown space is on (`shownMachine`,
+ * a machine name or null), while it is open (`open`, thread IDs), once `everyMs` have passed since the last post for
+ * it (`lastAt`, ms or undefined). A space on a machine named for no open thread, or on this computer, posts nothing.
+ */
+export function presenceDue(shownMachine, open, lastAt, now, everyMs) {
+  if (shownMachine === null || !open.has(shownMachine)) return null;
+  return lastAt === undefined || now - lastAt >= everyMs ? shownMachine : null;
 }
