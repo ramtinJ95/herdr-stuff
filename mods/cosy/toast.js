@@ -23,7 +23,7 @@ export default class Toast {
     const L = look();
     const p = props() ?? {};
     return h_flex().id("note").size_full().px(16).gap(12).items_center().cursor_pointer()
-      .bg(L.paper).hover((s) => s.bg("#fbf1d9"))
+      .rounded(L.card.radius).bg(L.card.ground).border(1).border_color(L.card.edge).hover((s) => s.bg(L.card.lift))
       .on_click(() => {
         if (p.action?.name) run(p.action.name, p.action.args ?? {});
         closeOverlay(p.overlay);
@@ -31,7 +31,7 @@ export default class Toast {
       // What kind of news: the program's icon, else a dot in the level's color.
       .child(p.icon ? image(p.icon).w(20).h(20).flex_none() : div().size(9).rounded(5).flex_none().bg(L.t[MARK[p.level] ?? "accent"]))
       .child(v_flex().flex_1().min_w(0)
-        .child(div().truncate().font_family(SERIF).text_size(19).line_height("23px").text_color(L.ink).child(p.title ?? ""))
-        .when(Boolean(p.body), (el) => el.child(div().truncate().text_size(11.5).text_color(L.inkDim).child(p.body))));
+        .child(div().truncate().font_family(SERIF).text_size(19).line_height("23px").text_color(L.card.text).child(p.title ?? ""))
+        .when(Boolean(p.body), (el) => el.child(div().truncate().text_size(11.5).text_color(L.card.dim).child(p.body))));
   }
 }

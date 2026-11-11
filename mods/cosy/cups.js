@@ -2,13 +2,18 @@
 // works, gets a note leaning on it when the agent needs you, a green mark
 // when it finished while you were away, and stands empty while it rests.
 // The cups that need you come first. Click: go to that agent; right-click:
-// its pane's menu.
+// its pane's menu. A cup has its program's mark printed on it, so Pi's cups
+// and Claude Code's are told apart at a glance.
 
 import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { agents, run, setAgentOrder } from "herdr";
-import { serif, alpha, ago, MOOD, URGENCY, ICON } from "./look.js";
+import { serif, alpha, ago, programIcon, MOOD, URGENCY, ICON } from "./look.js";
 import { openMenu } from "./menu.js";
+
+// The pottery's blue: what a one-color mark is printed in (a program's own
+// colors stay as they are).
+const COBALT = "#5f7cae";
 
 export default class Cups {
   init(cx) {
@@ -50,6 +55,9 @@ export default class Cups {
       .child(div().relative().flex_none().w(50).h(60)
         .when(st === "working", (el) => el.child(this.steam(L, 12, 2600)).child(this.steam(L, 23, 3400)))
         .child(image(`${ICON}/${resting ? "cup-empty" : "cup"}.svg`).absolute().left(0).bottom(2).w(48).h(40).when(resting, (el) => el.opacity(0.7)))
+        // The mark, on the cup's front (the cup is drawn 48 x 40, its front around 20, 22).
+        .when(Boolean(a.program?.icon), (el) => el.child(programIcon(a.program, 14, COBALT, svg, image)
+          .absolute().left(13).bottom(13).when(resting, (m) => m.opacity(0.7))))
         .when(st === "blocked", (el) => el.child(image(`${ICON}/note.svg`).absolute().left(30).top(12).w(20).h(22)
           .loop("top", { from: 12, to: 8, period: 900 })))
         .when(st === "done", (el) => el.child(image(`${ICON}/ready.svg`).absolute().left(32).top(16).w(17).h(17))))

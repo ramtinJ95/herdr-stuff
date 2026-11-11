@@ -2,6 +2,7 @@
 # Cuts the layout's art from the wallpaper it is built around (1586x992):
 #   room.jpg      the whole room, out of focus, dimmed and toned in walnut: behind everything
 #   street.jpg    the snowy street in walnut and amber: what the terminals' glass looks onto
+#   wood.jpg      one long plank of the table's wood: the beam the lamps hang from (wood-r.jpg: its mirror)
 #   shelf.webp    the ivy and the top shelf: head of the bookshelf (sidebar)
 #   table.webp    the cup, the bun and the lamp: foot of the bookshelf
 #   shelves.webp  the bookshelf's whole column in deep shadow, fading out at its foot: behind the books
@@ -25,6 +26,18 @@ magick "$src" -crop 696x560+890+0 +repage -resize 1400x -blur 0x1.2 \
 magick "$src" -crop 320x992+506+0 +repage -resize 600x -blur 0x3 -modulate 30,90 \
   \( +clone -sparse-color Barycentric '0,0 white 0,%[fx:h-1] black' -sigmoidal-contrast 10x20% \) \
   -alpha off -compose CopyOpacity -composite -quality 86 -define webp:alpha-quality=100 "$out/shelves.webp"
+
+# The café's plank: a clear patch of the table top, pulled out along its
+# grain into one long board (shade at one end, lamplight at the other). Only
+# its grain is kept, in the room's walnut: the painting's shade is mauve,
+# which reads as another wood beside the shelf, and its lit end outshines a
+# lit lamp. wood.js lays it from one end of the beam and its mirror from the
+# other, so they meet in the middle whatever the width. The patch stops
+# short of the table's shadowed edge, which would be a dark line along the
+# beam's foot.
+magick "$src" -crop 195x48+1156+884 +repage -resize '2800x112!' -unsharp 0x1.2+0.8+0 \
+  -colorspace Gray -auto-level -sigmoidal-contrast 3x45% +level-colors '#1e130b,#754b29' -quality 88 "$out/wood.jpg"
+magick "$out/wood.jpg" -flop -quality 88 "$out/wood-r.jpg"
 
 # card <crop> <height> <top|bottom: the rounded, opaque end> <name>
 card() {

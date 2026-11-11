@@ -3,6 +3,7 @@
     "ctrl-f b": "cosy.tabs",
     "ctrl-f a": "cosy.agents",
     "ctrl-f tab": "cosy.back",
+    "ctrl-f r": "cosy.looks",
     "ctrl-f m": "mod.open:cosy"
   }
 }

@@ -9,10 +9,14 @@ import { h_flex, v_flex, ScrollHandle } from "gpui-base";
 import { spaces, panes, run, window, knownAgents } from "herdr";
 import { look, alpha, stop, programIcon, ICON, SERIF } from "./look.js";
 import { openMenu } from "./menu.js";
+import { askTabName } from "./ask.js";
+import { Ways } from "./find.js";
+import { lying } from "./wood.js";
 
 export default class Tabs {
   init(_p, cx) {
     this.pressed = null;
+    this.size = { width: 1200, height: 56 };
     this.scroll = ScrollHandle.new();
     // The agents installed here, for the new tab card: asked once, up front,
     // so the card opens at its full size.
@@ -24,20 +28,8 @@ export default class Tabs {
         console.log(`cosy: the new tab card lists no agents, the installed-agent check failed (${e})`);
       }
     });
-    // Ctrl-f navigation (the navigation mod's controller), when install.sh
-    // found it and put it beside this file: it takes cosy.tabs, cosy.agents
-    // and cosy.back from here, and is this mod's only listener: a key
-    // command goes to one waiting nextCommand(), so a second listener
-    // anywhere in the mod would swallow every other press. Without it those
-    // keys do nothing.
-    cx.spawn(async (cx) => {
-      try {
-        const { NavigationController } = await import("./navigation/controller.js");
-        this.navigation = new NavigationController(cx);
-      } catch (e) {
-        console.log(`cosy: Ctrl-f b / a / Tab are off, ./navigation/controller.js did not load (${e})`);
-      }
-    });
+    // The layout's Ctrl-f keys: the lists, and back.
+    this.ways = new Ways(cx);
   }
 
   lamp(L, c, i, shown, space) {
@@ -61,7 +53,7 @@ export default class Tabs {
         .child(svg(`${ICON}/x.svg`).size(10))));
     return v_flex().id(`tab-${c.id}`).relative().flex_none().h_full().items_center().cursor_pointer()
       .hover((s) => s.opacity(lit ? 1 : 0.82))
-      .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.pressed = i; if (e.click_count === 2) run("tab.rename", { id: c.id }); })
+      .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.pressed = i; if (e.click_count === 2) askTabName(c); })
       .on_mouse_up("left", () => {
         const from = this.pressed;
         this.pressed = null;
@@ -87,7 +79,7 @@ export default class Tabs {
   }
 
   render() {
-    this.navigation?.observe();
+    this.ways.observe();
     const L = look();
     const space = spaces().find((s) => s.active);
     const shown = space?.tabs ?? [];
@@ -97,7 +89,10 @@ export default class Tabs {
       if (active >= 0) this.scroll.scroll_to_item(active);
     }
     const w = window();
-    return h_flex().id("beam").size_full().min_w(0).pl(14).pr(12).gap(10).items_center()
+    return h_flex().id("beam").relative().size_full().min_w(0).pl(14).pr(12).gap(10).items_center()
+      .on_size_change((size, cx) => { this.size = size; cx.notify(); })
+      // The beam's wood, inside the layout's 1px border.
+      .children(lying(this.size.width - 2, this.size.height - 2, { x: 1, y: 1, round: 12 }))
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel((e) => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
       .child(div().id("menu-card").flex_none().h(27).px(11).flex().items_center().rounded(3).cursor_pointer()
