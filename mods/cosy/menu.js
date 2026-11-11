@@ -1,4 +1,4 @@
-// The menu card: a paper menu, commands as dishes with their keys where the
+// The menu card: a café's menu, commands as dishes with their keys where the
 // prices go. One card for everything: the whole menu (kind "main"), a new
 // tab's choices ("new": a terminal, or any agent installed here), and the
 // right-click menus of a space, a tab and a pane. openMenu(kind, target)
@@ -7,7 +7,9 @@
 import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { props, run, openOverlay, closeOverlay, spaces, panes } from "herdr";
-import { look, alpha, keyFor, programIcon, SERIF } from "./look.js";
+import { look, alpha, keyFor, programIcon, onCard, heading, SERIF } from "./look.js";
+import { askTabName, askSpaceName, askSpaceClose } from "./ask.js";
+import { openFind } from "./find.js";
 
 // The whole menu's size is also mod.json's overlay (what mod.open opens):
 // 560 x height(card("main")). Change them together.
@@ -17,22 +19,24 @@ const TOP = 58;
 const PAD = 18;
 
 const item = (label, command, args = {}, key = command) => ({ label, key: keyFor(key), act: () => run(command, args) });
+// A line that asks first, on a card of its own (ask.js); `key` is the command it ends in.
+const asks = (label, key, ask, about) => ({ label, key: keyFor(key), act: () => { if (about) ask(about); } });
 
 // What each card lists: columns of sections of lines.
 function card(kind, target, extra) {
   if (kind === "space") {
     const s = spaces().find((x) => x.id === target.id);
     return { title: s?.name ?? "Space", columns: [[{ items: [
-      item("Rename", "space.rename", { id: target.id }),
+      asks("Rename", "space.rename", askSpaceName, s),
       item("A new tab here", "tab.new", { space: target.id }),
-      item("Close", "space.close", { id: target.id }),
+      asks("Close", "space.close", askSpaceClose, s),
     ] }]] };
   }
   if (kind === "tab") {
     const tabs = spaces().find((x) => x.id === target.space)?.tabs ?? [];
     const at = tabs.findIndex((c) => c.id === target.id);
     return { title: "This tab", columns: [[{ items: [
-      item("Rename", "tab.rename", { id: target.id }),
+      asks("Rename", "tab.rename", askTabName, tabs[at]),
       ...(at > 0 ? [item("Move left", "tab.move", { id: target.id, index: at }, "")] : []),
       ...(at >= 0 && at < tabs.length - 1 ? [item("Move right", "tab.move", { id: target.id, index: at + 2 }, "")] : []),
       item("Close", "tab.close", { id: target.id }),
@@ -53,11 +57,12 @@ function card(kind, target, extra) {
       ...(extra?.brews ?? []).map((a) => ({ label: a.name, key: "", program: a, act: () => run("tab.new", { argv: a.run }) })),
     ] }]] };
   }
+  const here = spaces().find((x) => x.active);
   return { title: "Menu", columns: [
     [
       { title: "Tabs", items: [
         item("A new tab", "tab.new"),
-        item("Rename", "tab.rename"),
+        asks("Rename", "tab.rename", askTabName, here?.tabs.find((c) => c.active)),
         item("Next", "tab.next"),
         item("Close", "tab.close"),
       ] },
@@ -71,14 +76,14 @@ function card(kind, target, extra) {
     [
       { title: "The shelf", items: [
         item("A new space", "space.new"),
-        item("Rename space", "space.rename"),
+        asks("Rename space", "space.rename", askSpaceName, here),
         item("Find anything", "mod.open", { name: "picker" }, "mod.open:picker"),
       ] },
       { title: "The house", items: [
         item("Every command", "app.palette"),
         item("Shortcuts", "app.help"),
         item("Settings", "app.settings"),
-        item("Another layout", "layout.switch"),
+        { label: "Another look", key: keyFor("cosy.looks"), act: () => openFind("looks") },
       ] },
     ],
   ] };
@@ -98,13 +103,13 @@ export function openMenu(kind, target = null, { at, brews } = {}) {
 export default class Menu {
   line(L, it, id) {
     return h_flex().id(id).h(ROW).px(6).gap(7).items_center().rounded(4).cursor_pointer()
-      .hover((s) => s.bg(alpha(L.ink, 0.09)))
+      .hover((s) => s.bg(alpha(L.card.wash, 0.08)))
       .on_click(() => { closeOverlay(props().overlay); it.act(); })
-      .when(Boolean(it.program?.icon), (el) => el.child(programIcon(it.program, 15, L.ink, svg, image)))
-      .child(div().flex_none().max_w(190).truncate().font_family(SERIF).text_size(19).line_height("22px").text_color(L.ink).child(it.label))
+      .when(Boolean(it.program?.icon), (el) => el.child(programIcon(it.program, 15, L.card.text, svg, image)))
+      .child(div().flex_none().max_w(190).truncate().font_family(SERIF).text_size(19).line_height("22px").text_color(L.card.text).child(it.label))
       // The dotted leader to the price.
-      .child(div().flex_1().min_w(8).h(9).border_b(1).border_dashed().border_color(alpha(L.ink, 0.3)))
-      .when(Boolean(it.key), (el) => el.child(div().flex_none().text_size(10.5).text_color(L.inkDim).child(it.key)));
+      .child(div().flex_1().min_w(8).h(9).border_b(1).border_dashed().border_color(alpha(L.card.wash, 0.22)))
+      .when(Boolean(it.key), (el) => el.child(div().flex_none().text_size(10.5).text_color(L.card.key).child(it.key)));
   }
 
   render() {
@@ -114,16 +119,13 @@ export default class Menu {
   }
 
   sheet(L, c) {
-    return v_flex().id("menu").size_full().p(PAD).rounded(6).bg(L.paper).border(1).border_color(L.paperEdge).shadow_lg()
-      .child(v_flex().h(TOP).flex_none().items_center()
-        .child(div().max_w(220).truncate().font_family(SERIF).italic().text_size(30).line_height("34px").text_color(L.ink).child(c.title))
-        // A double rule under the title, as on a printed menu.
-        .child(div().mt(6).w_full().h(3).border_t(1).border_b(1).border_color(alpha(L.ink, 0.45))))
+    return onCard(L, v_flex().id("menu").size_full().p(PAD))
+      .child(heading(L, c.title).h(TOP))
       .child(h_flex().flex_1().min_h(0).gap(26).items_start()
         .children(c.columns.map((col, ci) => v_flex().flex_1().min_w(0).gap(10)
           .children(col.map((sec, si) => v_flex()
             .when(Boolean(sec.title), (el) => el.child(div().h(HEAD).px(6).flex().items_center()
-              .text_size(10).font_semibold().text_color(L.inkDim).child(sec.title.toUpperCase())))
+              .text_size(10).font_semibold().text_color(L.card.dim).child(sec.title.toUpperCase())))
             .children(sec.items.map((it, i) => this.line(L, it, `line-${ci}-${si}-${i}`))))))));
   }
 }

@@ -5,9 +5,14 @@
 //           under them, steaming while they work
 //   lights  the string of fairy lights down the shelf's post
 //   tabs    the beam: tabs as pendant lamps, the lit one is shown
-//   pane    a pane's top rail (the layout's pane header)
+//   pane    the light on a pane: a veil on the ones you aren't in (the
+//           layout's pane header, a hairline)
 //   menu    the menu card: commands with their keys as prices (a popup;
 //           also what mod.open shows, per mod.json)
+//   ask     a question on a card: a name to write in, or a yes
+//           before a space is closed (a dialog)
+//   find    a list to pick from, on a card: the agents, this space's tabs,
+//           the looks (a dialog)
 //   toast   a note left on the table (the layout's "toast": no role prop)
 
 import { View, div } from "gpui-kit";
@@ -18,8 +23,10 @@ import Tabs from "./tabs.js";
 import Pane from "./pane.js";
 import Menu from "./menu.js";
 import Toast from "./toast.js";
+import Ask from "./ask.js";
+import Find from "./find.js";
 
-const ROLES = { shelf: Shelf, lights: Lights, tabs: Tabs, pane: Pane, menu: Menu, toast: Toast };
+const ROLES = { shelf: Shelf, lights: Lights, tabs: Tabs, pane: Pane, menu: Menu, toast: Toast, ask: Ask, find: Find };
 
 // Two copies come without a role: Herdr opens the layout's toast mod with the
 // notification as props, and mod.open (the menu's key) opens the mod as the
