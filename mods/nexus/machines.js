@@ -80,4 +80,11 @@ export async function showMachine(cx, name, worker, title) {
   else run("space.new", { name: title, machine: name });
   const shown = new Set(panes().map((p) => p.terminal).filter((t) => t !== null));
   for (const [command, args] of showSteps(shownTerminals, shown, address)) run(command, args);
+  // The app places the tabs in its own order, not the order asked, so the worker's tab is shown once its pane is there.
+  if (address === null || !shownTerminals.includes(address)) return;
+  const placed = () => { const has = new Set(panes().map((p) => p.terminal)); return shownTerminals.every((t) => has.has(t)); };
+  for (const until = Date.now() + showMs; !placed(); await cx.sleep(200)) {
+    if (Date.now() > until) throw new Error(`Herdr did not give every terminal of ${name} a pane within ${showMs / 1000} s`);
+  }
+  run("pane.focus", { terminal: address });
 }
