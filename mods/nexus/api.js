@@ -1,37 +1,23 @@
 // The control plane's HTTP API, reached as the `nexus` CLI reaches it: the URL `nexus connect` saved.
 // The API admits a caller by its tailnet node, so no token is sent.
-import { home, readTextFile } from "herdr";
+import { exec, home, readTextFile } from "herdr";
 import net from "net";
 import { Buffer } from "buffer";
 import { URL } from "url";
 import { sseReader } from "./sse.js";
+import { connection, request, socksSocket } from "./transport.js";
 
 export async function connect() {
   const path = `${home()}/.config/nexus/cli.json`;
   const text = await readTextFile(path);
   if (text === null) throw new Error(`${path} is missing. Run \`nexus connect <control plane>\` first.`);
   const config = JSON.parse(text);
-  if (typeof config.url !== "string") throw new Error(`${path} names no control plane URL. Run \`nexus connect <control plane>\`.`);
-  // fetch cannot go through a SOCKS proxy, so a device that needs one (ts-home's) cannot use this panel yet.
-  if (typeof config.socks === "string" && config.socks !== "none") throw new Error(`${path} reaches Nexus through the SOCKS proxy ${config.socks}, which this panel cannot use.`);
-  return { url: config.url.replace(/\/+$/, "") };
+  return connection(config);
 }
 
 /** The API refuses a state change without a JSON content type, with or without a body, as the CLI sends it. */
 export async function call(conn, method, path, body) {
-  const options = {
-    method,
-    ...(method === "GET" ? {} : { headers: { "content-type": "application/json" } }),
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  };
-  const r = await fetch(`${conn.url}${path}`, options);
-  const text = await r.text();
-  let data = null;
-  if (text !== "") {
-    try { data = JSON.parse(text); } catch { data = { error: text.slice(0, 300) }; }
-  }
-  if (!r.ok) throw Object.assign(new Error(data?.error ?? `${method} ${path} answered HTTP ${r.status}`), { status: r.status });
-  return data;
+  return request(fetch, exec, conn, method, path, body);
 }
 
 /** A request ID the API deduplicates retries by, such as start:<id> or msg:<id>. */
@@ -54,9 +40,11 @@ export function plainApi(conn) {
  * pings a quiet stream every 15 s, so a stream no one wants closes within that. Throws for a refused request, with
  * the server's reason.
  */
-export async function follow(conn, path, onEvent, live = () => true) {
+export async function follow(conn, path, onEvent, live = () => true, sleep) {
   const { host, port } = plainApi(conn);
-  const socket = await net.connect(host, port);
+  const socket = conn.socks
+    ? await socksSocket((host, port) => net.connect(host, port), conn.socks, host, port, sleep)
+    : await net.connect(host, port);
   try {
     await socket.write(`GET ${path} HTTP/1.0\r\nHost: ${host}:${port}\r\nAccept: text/event-stream\r\n\r\n`);
     const reader = sseReader((bytes) => Buffer.from(bytes).toString("utf8"));
@@ -78,13 +66,13 @@ export async function follow(conn, path, onEvent, live = () => true) {
  * The ID after which new events come, without reading the history: a follower from `latest` gets a keep-alive with
  * the newest ID each second, and is closed on the first.
  */
-export async function latestCursor(conn) {
+export async function latestCursor(conn, sleep) {
   let cursor = null;
   await follow(conn, "/v1/events?follow=true&since=latest", (e) => {
     if (e.id === null) return true;
     cursor = e.id;
     return false;
-  });
+  }, () => true, sleep);
   if (cursor === null) throw new Error("the event stream ended before it said its latest event");
   return cursor;
 }

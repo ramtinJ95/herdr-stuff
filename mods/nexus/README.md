@@ -11,7 +11,7 @@ A [Herdr app](https://herdr.dev) mod with much of the dashboard beside your term
   - messaging, steering, Stop, Retry, Archive, marking seen, and Attach, which shows the pylon's terminals in the app.
 - **Other pages:** pipeline items with Approve and Cancel, the cluster's release and nodes, and token usage.
 
-It uses the control plane that `nexus connect`, the [Nexus](https://github.com/ramtinJ95/nexus) CLI, saved in `~/.config/nexus/cli.json`, so connect the CLI first. A device that reaches Nexus through a SOCKS proxy cannot use it yet.
+It uses the control plane that `nexus connect`, the [Nexus](https://github.com/ramtinJ95/nexus) CLI, saved in `~/.config/nexus/cli.json`, so connect the CLI first. Both direct connections and a saved SOCKS5 proxy are supported.
 
 Install it by linking it into the app's mods:
 
@@ -21,7 +21,34 @@ ln -s "$PWD/mods/nexus" ~/.config/herdr-app/mods/nexus
 
 Open it as a floating window with `herdr-app do mod.open '{"name":"nexus"}'`, or docked beside the focused pane with `herdr-app do pane.split '{"direction":"right","mod":"nexus"}'`. Its Pop out and Dock buttons switch between the two and keep the view. Props open a view: `{"thread": "th-..."}` or `{"tab": "needs" | "flight" | "threads" | "items" | "cluster" | "usage" | "start"}`. Its `keys.json` has the key that toggles the window, `ctrl-f e` → `mod.open:nexus`: merge it into `~/.config/herdr-app/keys.json`. Drag the window by its header; it reopens where you left it, and Esc or ✕ closes it.
 
-The app does not hot-reload a linked mod: after a change, close and reopen the panel. Check a change with `herdr-app check mods/nexus`. `npm test` at the repo root runs `model.test.js` and `stream.test.js`.
+Check a change with `herdr-app check mods/nexus`. `npm test` at the repo root runs the model, stream and transport regression tests.
+
+## The same mod on every machine
+
+Use the same checkout's `main` branch on both machines. Update with `git pull --ff-only` in this repo, then close and reopen the Nexus panel to ensure it loads the new code and configuration (newer Herdr versions also reload mod edits automatically). Keep `~/.config/nexus/cli.json` local to each machine; it is not part of this repo.
+
+On a machine connected directly to the personal tailnet, use its saved control-plane URL with `socks` omitted or `"none"`. On a work-tailnet machine, use that same URL with its local home-tailnet SOCKS proxy as below. Pulling this repo never copies proxy settings between machines. Both paths use the same actions, Attach, presence updates and live conversations.
+
+## A home tailnet alongside a work tailnet
+
+Keep the work Tailscale app connected normally. If the home tailnet is served by a separate userspace daemon (such as `ts-home`), keep its SOCKS5 proxy running and use the Nexus CLI's saved configuration:
+
+```json
+{
+  "url": "https://your-home-control-plane:7443",
+  "socks": "localhost:1055"
+}
+```
+
+The mod reads that file when opened; it does not change it or either tailnet. No routes, exit nodes, sharing, or local forwarding services are added.
+
+- With `socks` absent or `"none"`, native `fetch` and direct streaming behave as before.
+- With `socks: "HOST:PORT"`, JSON requests use `curl` on `PATH`, with SOCKS-side DNS and normal HTTPS certificate verification. Streaming sockets connect only to that proxy and send the destination hostname in a SOCKS5 handshake. No-auth SOCKS5 is required.
+- A proxy error is shown, never retried directly. `NO_PROXY` and `.curlrc` cannot bypass the proxy. Requests have a 30-second timeout and are not automatically retried; a timed-out mutation may already have executed.
+- Conversations still stream live, not as buffered polling. Stream operations time out after 30 seconds without progress. Herdr 0.1.14–0.1.15 only writes UTF-8 strings to sockets: the standard stream port `7470` works, but a custom stream port whose two bytes contain a value above 127, or a hostname longer than 127 bytes/non-ASCII, is explicitly refused. Direct mode is not subject to this restriction.
+- **Attach** uses `hc machine add --via 'nexus exec <thread>'`, as described below. Keep the Nexus CLI current: `nexus exec` must support the CLI's saved proxy too. External links still open in your browser; the mod does not configure browser proxy settings.
+
+This is application-level proxy use, not a bridge between tailnets. Closing the panel closes its stream; it does not stop the proxy or disconnect either tailnet.
 
 ## How it reads the control plane
 

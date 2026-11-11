@@ -106,7 +106,7 @@ export default class Nexus extends View {
    */
   async newestEvent(cx) {
     try {
-      return await latestCursor(this.conn);
+      return await latestCursor(this.conn, (ms) => cx.sleep(ms));
     } catch (e) {
       this.status = { level: "info", text: `Reading the event history, as the stream refused: ${e instanceof Error ? e.message : e}`, startup: true };
       cx.notify();
@@ -294,7 +294,7 @@ export default class Nexus extends View {
             delay = 1_000;
             cx.notify();
             return true;
-          }, mine);
+          }, mine, (ms) => cx.sleep(ms));
           if (mine()) this.live = { ...this.live, error: "the stream ended" };
         } catch (e) {
           if (mine()) this.live = { ...this.live, error: e instanceof Error ? e.message : String(e) };
