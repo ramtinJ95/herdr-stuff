@@ -4,8 +4,8 @@
   "selection": "#4b3a2b",
   "cursor": "#f0b565",
   "ansi": [
-    "#2a201b", "#dc7562", "#a5b76c", "#e9b25f", "#829dd4", "#bb96c6", "#89bab3", "#d8cbb2",
-    "#8f7b68", "#ea917e", "#bccb87", "#f5c97d", "#a0b6e5", "#d0aed9", "#a6d1ca", "#f5ecd9"
+    "#2a201b", "#dc7562", "#a5b76c", "#e9b25f", "#d2ab82", "#bd93a3", "#98b5a6", "#d8cbb2",
+    "#8f7b68", "#ea917e", "#bccb87", "#f5c97d", "#e3c4a0", "#d4afbc", "#b4cbbe", "#f5ecd9"
   ],
   "colors": {
     "canvas": "#120d0b",
