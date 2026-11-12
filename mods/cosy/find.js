@@ -38,6 +38,11 @@ export const openFind = (kind) => openOverlay({ mod: "cosy", kind: "dialog", fra
  * nextCommand() listener, since a key command goes to a single waiting one.
  * Back needs to have seen where you were, so the beam calls observe() as it
  * draws.
+ *
+ * The listener is its own task, waiting from the beam's init on. Behind the
+ * model's import it went deaf: a module outlives a visit to the layout, and
+ * on the next visit the import already made resumed outside the beam's copy,
+ * so the nextCommand() after it was no copy's and the keys reached no one.
  */
 export class Ways {
   constructor(cx) {
@@ -48,6 +53,8 @@ export class Ways {
       } catch (e) {
         this.missing = `Ctrl-f Tab needs the navigation mod's model.js beside the cosy mod: run mods/cosy/install.sh (${e})`;
       }
+    });
+    cx.spawn(async (cx) => {
       for (;;) {
         const command = await nextCommand();
         this.observe();
@@ -65,7 +72,7 @@ export class Ways {
   observe() { this.history?.observe(this.target()); }
 
   back() {
-    if (!this.history) return notify({ title: "Can't go back", body: this.missing, level: "error" });
+    if (!this.history) return notify({ title: "Can't go back", body: this.missing ?? "The navigation model is still loading.", level: "error" });
     const to = this.history.previous(this.target(), (t) => this.nav.targetAlive(t, panes(), terminals()));
     if (this.overlay) closeOverlay(this.overlay);
     if (to) run(to.action.command, to.action.args);
