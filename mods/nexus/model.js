@@ -204,17 +204,32 @@ export function tokens(n) {
   return String(n);
 }
 
+const threadId = /^th-[0-9a-f]{12}$/;
+
 /**
  * The name of the Core machine Attach makes of a thread's pylon: the thread's ID. The name goes into `--via`'s sh
  * line, so anything but a thread ID is refused.
  */
 export function machineName(thread) {
-  if (!/^th-[0-9a-f]{12}$/.test(thread)) throw new Error(`${thread} is not a thread ID, so it names no machine`);
+  if (!threadId.test(thread)) throw new Error(`${thread} is not a thread ID, so it names no machine`);
   return thread;
 }
 
 /** What Herdr Core reaches a thread's machine through, as ssh: `nexus exec`, which never wakes a pylon. */
 export const machineVia = (name) => `nexus exec ${name}`;
+
+/** Whether a machine `hc machine ls` lists is as Attach makes one: reached through `nexus exec` of the thread it is named for. */
+export const pylonMachine = (m) => m.via === true && m.target === machineVia(m.name);
+
+/**
+ * The threads attached now: one for each machine the app has that is named as a thread's is (`machines`, as
+ * `machines()` gives them), titled from its open row (`rows`), else by its ID. `here` says the shown space is on it
+ * (`shown`, a machine name or null), and `layout` whether the app reaches it.
+ */
+export function attachedThreads(machines, rows, shown) {
+  return machines.filter((m) => m.name !== null && threadId.test(m.name))
+    .map((m) => ({ id: m.name, title: rows.find((r) => r.id === m.name)?.title ?? m.name, here: m.name === shown, layout: m.layout }));
+}
 
 /**
  * The machines the panel added (`added`, names) whose thread is no longer open: `remove` those `hc machine ls`
@@ -223,7 +238,7 @@ export const machineVia = (name) => `nexus exec ${name}`;
  */
 export function strayMachines(added, listed, open) {
   const stray = added.filter((name) => !open.has(name));
-  const ours = (name) => listed.some((m) => m.name === name && m.via === true && m.target === machineVia(name));
+  const ours = (name) => listed.some((m) => m.name === name && pylonMachine(m));
   return { remove: stray.filter(ours), forget: stray.filter((name) => !ours(name)) };
 }
 

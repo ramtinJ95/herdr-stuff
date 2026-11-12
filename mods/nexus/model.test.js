@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { arrivalKey, arrivals, askBody, attentionOf, byProject, changesThreads, clusterNode, inFlight, itemGroups, landOffer, machineName, machineVia, openItems, needsYou, openQuestions, pick, showSteps, strayMachines, unstarted, workerTerminal, presenceDue } from "./model.js";
+import { arrivalKey, arrivals, askBody, attachedThreads, attentionOf, byProject, changesThreads, clusterNode, inFlight, itemGroups, landOffer, machineName, machineVia, openItems, needsYou, openQuestions, pick, pylonMachine, showSteps, strayMachines, unstarted, workerTerminal, presenceDue } from "./model.js";
 
 const row = (id, over = {}) => ({
   id, title: id, project: "p", status: "active", attention: null, working: false, createdAt: 1,
@@ -98,6 +98,23 @@ test("a thread's machine is named after the thread, and only a thread ID makes o
   assert.equal(machineVia("th-fece39854aa2"), "nexus exec th-fece39854aa2");
   assert.throws(() => machineName("th-1; rm -rf ~"), /not a thread ID/);
   assert.throws(() => machineName("vps"), /not a thread ID/);
+});
+
+test("a thread is attached while the app has a machine of its name, here when the shown space is on it", () => {
+  const machines = [{ name: null, layout: "ready" }, { name: "vps", layout: "ready" }, { name: "th-000000000001", layout: "ready" }, { name: "th-000000000002", layout: "unavailable" }];
+  const rows = [row("th-000000000001", { title: "Fix login" }), row("th-000000000003")];
+  assert.deepEqual(attachedThreads(machines, rows, "th-000000000001"), [
+    { id: "th-000000000001", title: "Fix login", here: true, layout: "ready" },
+    { id: "th-000000000002", title: "th-000000000002", here: false, layout: "unavailable" },
+  ], "a machine whose thread is no longer open still shows, by its ID, so it can be detached");
+  assert.deepEqual(attachedThreads(machines.slice(0, 2), rows, null), [], "this computer and the person's own machines are no thread's");
+});
+
+test("a machine is Attach's to remove only when it reaches its thread's pylon through nexus exec", () => {
+  const name = "th-000000000001";
+  assert.equal(pylonMachine({ name, via: true, target: machineVia(name) }), true);
+  assert.equal(pylonMachine({ name, via: false, target: "vps" }), false, "an ssh machine of that name");
+  assert.equal(pylonMachine({ name, via: true, target: "nexus exec th-000000000002" }), false, "another thread's pylon");
 });
 
 test("the machines to remove are only those the panel added, for threads no longer open, still as it made them", () => {
