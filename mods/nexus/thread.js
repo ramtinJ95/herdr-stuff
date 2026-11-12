@@ -17,12 +17,17 @@ export function threadView(app, ui, now) {
   const worker = d.claudeWorker ? `Claude Code (${d.claudeWorker.model ?? "default model"}, ${d.claudeWorker.state})` : "Nexus agent";
   const working = th.agentTurnRunning || app.live?.working === true;
   const confirming = (key) => app.confirm === key;
+  // Attach becomes Detach while the thread is attached; the bar above the tabs shows its terminals again.
+  const work = app.machineWork;
+  const machine = work?.thread === id ? button("machine", work.doing === "attach" ? "Attaching…" : "Detaching…", () => {}, { disabled: true })
+    : app.attached().some((a) => a.id === id) ? button("detach", "Detach", (cx) => app.detach(cx, id), { disabled: work !== null })
+    : button("attach", "Attach", (cx) => app.attach(cx, id), { disabled: !open || work !== null });
 
   const toolbar = row(
     button("back", "← Back", (cx) => app.show(cx, { thread: null })),
     div().flex_1(),
     button("dash", "Dashboard", () => app.openUrl(`${app.conn.url}/threads/${id}`)),
-    button("attach", app.attaching === id ? "Attaching…" : "Attach", (cx) => app.attach(cx, id), { disabled: !open || app.attaching !== null }),
+    machine,
   );
 
   const actions = row(

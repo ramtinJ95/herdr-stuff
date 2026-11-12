@@ -3,10 +3,10 @@
 // Docked as a pane (pane.split {mod: "nexus"}) or as a floating window (mod.open:nexus); each can switch to the other.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextareaState } from "gpui-base";
-import { closeOverlay, exec, focused, nextCommand, notify, panes, props, run, setShared, shared, spaces, theme, window as appWindow } from "herdr";
+import { closeOverlay, exec, focused, machines, nextCommand, notify, panes, props, run, setShared, shared, spaces, theme, window as appWindow } from "herdr";
 import { call, connect, follow, latestCursor, requestId } from "./api.js";
-import { ago, arrivalKey, arrivals, askBody, attentionLabel, attentionOf, changesThreads, countOpen, inFlight, needsYou, openItems, openQuestions, pick, presenceDue, workerTerminal } from "./model.js";
-import { addMachine, reconcileMachines, showMachine } from "./machines.js";
+import { ago, arrivalKey, arrivals, askBody, attachedThreads, attentionLabel, attentionOf, changesThreads, countOpen, inFlight, needsYou, openItems, openQuestions, pick, presenceDue, workerTerminal } from "./model.js";
+import { addMachine, detachMachine, reconcileMachines, showMachine } from "./machines.js";
 import { applyClaude, applyHarness, emptyLive } from "./transcript.js";
 import { kit } from "./ui.js";
 import { pageBlocks, threadView } from "./thread.js";
@@ -25,6 +25,7 @@ const presenceKey = "nexus.presence";
 const viewKey = "nexus.view";
 const notifiedKey = "nexus.notified";
 const pageTabs = ["items", "cluster", "usage"];
+const attachedRowPx = 36;
 /** Keeps a press from dragging the window, so the control under it gets it. */
 const stop = (_e, cx) => cx.stop_propagation();
 
@@ -46,7 +47,8 @@ export default class Nexus extends View {
     this.refreshAgain = false;
     this.polling = false;
     this.sending = false;
-    this.attaching = null;
+    // The Attach or Detach under way, one at a time: { thread, doing: "attach" | "detach" }.
+    this.machineWork = null;
     this.worker = "claude";
     this.project = null;
     this.message = TextareaState.new({ placeholder: "Message the agent", rows: 3 });
@@ -91,6 +93,7 @@ export default class Nexus extends View {
         const command = await nextCommand();
         if (command === "focus") this.handle.focus();
         else if (command === "attach" || command === "archive") this.shownThreadCommand(cx, command);
+        else if (command === "detach") this.detachCommand(cx);
         cx.notify();
       }
     });
@@ -488,26 +491,71 @@ export default class Nexus extends View {
    * through `nexus exec`, which never wakes a pylon, so a paused one is woken first.
    */
   attach(cx, id) {
-    if (this.attaching !== null) return;
-    this.attaching = id;
+    if (this.machineWork !== null) return;
+    this.machineWork = { thread: id, doing: "attach" };
     cx.notify();
     cx.spawn(async (cx) => {
       try {
+        const isAttached = () => this.attached().some((a) => a.id === id);
+        const was = isAttached();
         const detail = await this.runningPylon(cx, id);
+        // Another copy of the panel may detach it during the wake, which adding the machine again would undo.
+        if (was && !isAttached()) throw new Error(`${id} was detached while its pylon woke, so its terminals are not shown`);
         this.status = { level: "info", text: `Adding the pylon of ${id} as a machine…` };
         cx.notify();
         const name = await addMachine(id);
         this.status = { level: "info", text: `Waiting for Herdr to show ${name}…` };
         cx.notify();
         await showMachine(cx, name, workerTerminal(detail), detail.thread.title);
-        this.status = { level: "success", text: `Attached: ${name}` };
+        // Said as done, not as a state: the bar shows what is attached, and another copy may detach it.
+        this.status = { level: "success", text: `Attaching ${name}: done` };
+        // A docked copy stays behind in its own space, so the space now shown says what it is and where Detach is.
+        if (!props()?.overlay) notify({ title: `Attached: ${detail.thread.title}`, body: "This space shows its pylon's terminals. Detach in Nexus.", level: "info", action: { name: "mod.open", args: { name: "nexus" } } });
       } catch (e) {
         this.fail(cx, e);
       } finally {
-        this.attaching = null;
+        this.machineWork = null;
         cx.notify();
       }
     });
+  }
+
+  /** The threads attached now, from the machines the app has. */
+  attached() {
+    return attachedThreads(machines(), this.rows, spaces().find((s) => s.active)?.machine ?? null);
+  }
+
+  /**
+   * Removes the thread's machine, and with it its space from the app, going back to the space Attach left when the
+   * machine's is the one shown. Its terminals keep running in the pylon, so attaching again finds them as they were.
+   */
+  detach(cx, id) {
+    if (this.machineWork !== null) return;
+    this.machineWork = { thread: id, doing: "detach" };
+    this.status = { level: "info", text: `Detaching from ${id}…` };
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        await detachMachine(cx, id);
+        this.status = { level: "success", text: `Detached from ${id}: its terminals keep running in the pylon` };
+      } catch (e) {
+        this.fail(cx, e);
+      } finally {
+        this.machineWork = null;
+        cx.notify();
+      }
+    });
+  }
+
+  /**
+   * `nexus.detach`, for keys.json and `herdr-app do`: detaches the thread whose space is shown, else the panel's shown
+   * thread, else the only one attached.
+   */
+  detachCommand(cx) {
+    const attached = this.attached();
+    const thread = attached.find((a) => a.here) ?? attached.find((a) => a.id === this.view.thread) ?? (attached.length === 1 ? attached[0] : undefined);
+    if (thread === undefined) return this.fail(cx, new Error(attached.length === 0 ? "nexus.detach: no thread is attached" : `nexus.detach: ${attached.length} threads are attached, so show the space or the thread of the one to detach`));
+    this.detach(cx, thread.id);
   }
 
   /**
@@ -596,6 +644,20 @@ export default class Nexus extends View {
       .on_click((_e, cx) => this.show(cx, { tab: key, thread: null }))
       .child(text).when((counts[key] ?? 0) > 0, (el) => el.child(div().text_size(11).text_color(key === "needs" ? t.blocked : t.dim).child(String(counts[key]))));
 
+    // Every attached thread, on every page: the panel may be opened from the pylon's space, with another view shown.
+    // Three show at once and the rest scroll, so they never take a short docked pane from the page. The scroll area
+    // is given its height: left to a maximum, it takes all of it.
+    const work = this.machineWork;
+    const attached = this.attached();
+    const attachedRow = (a) => h_flex().id(`attached-${a.id}`).flex_none().h(attachedRowPx).px(12).gap(8).items_center().border_b_1().border_color(t.border).bg(t.raised).on_mouse_down("left", stop)
+      .child(ui.dot(a.layout === "unavailable" ? t.blocked : t.done))
+      .child(div().flex_none().text_size(11.5).font_semibold().text_color(a.layout === "unavailable" ? t.blocked : t.done)
+        .child(a.layout === "unavailable" ? "Attached, pylon not reachable" : a.here ? "Attached, shown in this space" : "Attached"))
+      .child(div().id(`attached-title-${a.id}`).flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).cursor_pointer()
+        .hover((s) => s.text_color(t.accent)).on_click((_e, cx) => this.show(cx, { thread: a.id })).child(a.title))
+      .children(a.here ? [] : [button(`terminals-${a.id}`, work?.thread === a.id && work.doing === "attach" ? "Showing…" : "Terminals", (cx) => this.attach(cx, a.id), { disabled: work !== null })])
+      .child(button(`detach-${a.id}`, work?.thread === a.id && work.doing === "detach" ? "Detaching…" : "Detach", (cx) => this.detach(cx, a.id), { disabled: work !== null }));
+
     const body = this.view.thread !== null ? threadView(this, ui, now)
       : this.view.tab === "start" ? startForm(this, ui)
       : this.view.tab === "items" ? itemsPage(this, ui, now)
@@ -618,6 +680,7 @@ export default class Nexus extends View {
         .child(button("new", "New thread", (cx) => this.show(cx, { tab: "start", thread: null }), { primary: true }))
         .child(inOverlay ? button("dock", "Dock", () => this.dock()) : button("popout", "Pop out", () => this.popOut()))
         .when(inOverlay, (el) => el.child(button("close", "✕", () => closeOverlay(props().overlay)))))
+      .when(attached.length > 0, (el) => el.child(v_flex().id("attached").flex_none().h(Math.min(attached.length, 3) * attachedRowPx).overflow_y_scrollbar().children(attached.map(attachedRow))))
       .child(h_flex().id("tabs").flex_none().flex_wrap().px(8).py(6).gap(4).border_b_1().border_color(t.border).on_mouse_down("left", stop)
         .child(tab("needs", "Needs you"))
         .child(tab("flight", "In flight"))

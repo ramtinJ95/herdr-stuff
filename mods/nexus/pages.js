@@ -3,7 +3,7 @@ import { div } from "gpui-kit";
 import { v_flex, h_flex, Textarea } from "gpui-base";
 import { ago, attentionLabel, byProject, clusterNode, inFlight, itemGroups, lastActivity, needsYou, tokens, unstarted } from "./model.js";
 
-function threadRow(app, ui, r, now) {
+function threadRow(app, ui, r, now, attached) {
   const { t, dot, tone } = ui;
   return h_flex().id(`row-${r.id}`).gap(10).px(8).py(7).rounded(6).items_center().cursor_pointer()
     .when(app.view.thread === r.id, (el) => el.bg(t.selected))
@@ -13,12 +13,14 @@ function threadRow(app, ui, r, now) {
     .child(v_flex().flex_1().overflow_hidden()
       .child(div().truncate().text_size(13).text_color(t.foreground).child(r.title))
       .child(div().truncate().text_size(11.5).text_color(t.muted)
-        .child([r.project, attentionLabel[r.attention] ?? r.pylon?.actualState ?? "", ago(lastActivity(r), now)].filter(Boolean).join(" · "))));
+        .child([r.project, attentionLabel[r.attention] ?? r.pylon?.actualState ?? "", ago(lastActivity(r), now)].filter(Boolean).join(" · "))))
+    .when(attached, (el) => el.child(div().flex_none().text_size(11.5).font_semibold().text_color(t.done).child("Attached")));
 }
 
 export function threadList(app, ui, now) {
   const { heading, empty } = ui;
-  const row = (r) => threadRow(app, ui, r, now);
+  const attached = new Set(app.attached().map((a) => a.id));
+  const row = (r) => threadRow(app, ui, r, now, attached.has(r.id));
   if (app.view.tab === "needs") {
     const needs = needsYou(app.rows);
     return needs.length === 0 ? [empty("Nothing waits on you.")] : needs.map(row);

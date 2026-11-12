@@ -8,7 +8,7 @@ A [Herdr app](https://herdr.dev) mod with much of the dashboard beside your term
   - its open questions, answered in place;
   - its review, with Land, Review again and Cancel;
   - its pull requests and changes;
-  - messaging, steering, Stop, Retry, Archive, marking seen, and Attach, which shows the pylon's terminals in the app.
+  - messaging, steering, Stop, Retry, Archive, marking seen, and Attach, which shows the pylon's terminals in the app, with Detach to take them out again.
 - **Other pages:** pipeline items with Approve and Cancel, the cluster's release and nodes, and token usage.
 
 It uses the control plane that `nexus connect`, the [Nexus](https://github.com/ramtinJ95/nexus) CLI, saved in `~/.config/nexus/cli.json`, so connect the CLI first. Both direct connections and a saved SOCKS5 proxy are supported.
@@ -60,7 +60,7 @@ This is application-level proxy use, not a bridge between tailnets. Closing the 
 - **Seen:** a shown reply is marked seen with its own `lastReplyAt`, as the dashboard does. This happens only while the window is active and the panel is on screen: the window, or a docked copy in the shown tab.
 - **Changes:** reading a thread's changes wakes a paused pylon, so they load only when you press Load changes.
 - **Confirmations:** Land, Archive and Cancel take a second press within 6 seconds. A Land that waives holds names them first.
-- **Commands:** `nexus.attach` and `nexus.archive` press the shown thread's Attach and Archive, for a key in `keys.json` or `herdr-app do nexus.archive`. Archive still takes a second command within 6 seconds.
+- **Commands:** `nexus.attach` and `nexus.archive` press the shown thread's Attach and Archive, for a key in `keys.json` or `herdr-app do nexus.archive`. Archive still takes a second command within 6 seconds. `nexus.detach` detaches the thread whose space the app shows, else the panel's shown thread, else the only one attached. A command reaches the panel only while a copy of it is on screen.
 - **Notifications:** they post only while a copy of the panel runs.
 
 ## Attach makes the pylon a machine
@@ -81,9 +81,27 @@ The machine is not added with `--temp`, because Herdr leaves temporary machines 
 
 While the app window is active and shows a space on an open thread's machine, the panel posts human activity for that thread every 4 minutes, as `nexus wake` does. A pylon you watch then does not pause for idleness, and a paused one wakes. A connection through `nexus exec` alone counts as no one, so this needs a copy of the panel running, docked or open, and stops once you switch spaces, leave the window, or close the panel.
 
-The panel removes only the machines it added. It records their names in its shared state, `nexus.machines`, since a machine you add by hand, as the Nexus docs show, looks the same. It removes a recorded machine with `hc machine rm <thread>` in these cases:
+### While attached
+
+A thread is attached for as long as the app has a machine of its name, whichever copy of the panel, or you, added it:
+
+- A bar under the panel's header names each attached thread, on every page; past three, it scrolls. It says when the space you are in is that thread's, or when its pylon is not reachable. Its title opens the thread, **Terminals** shows its space again, waking the pylon if need be, and **Detach** is there.
+- The thread's own Attach button reads Detach, and its row in the lists is marked Attached.
+- Attach from a docked copy leaves the panel behind in its own space, so it also posts a toast in the pylon's space. Clicking the toast opens the panel's window there.
+
+### Detach
+
+Detach removes the thread's machine with `hc machine rm <thread>`, which takes its space out of the app. The terminals keep running in the pylon and the pylon keeps the space's tabs, so attaching again shows them as they were. If you are in the thread's space, the app first goes back to the space you attached from, if it is still there. Detach reports done once the app no longer has the machine, and fails after 20 seconds if it still does.
+
+You asked for it, so Detach also removes a machine you added by hand, as long as it is reached through `nexus exec <thread>`. A machine of the thread's name that is reached any other way is left, and Detach says so.
+
+### What the panel removes unasked
+
+Unasked, the panel removes only the machines it added. It records their names in its shared state, `nexus.machines`, since a machine you add by hand, as the Nexus docs show, looks the same. It removes a recorded machine, as Detach does, in these cases:
 
 - You archive the thread from the panel.
 - On the minute's full read, the thread is no longer among the open threads, as after an archive or delete from the CLI or the dashboard.
 
-A recorded machine that you removed, or replaced with one that is not reached through `nexus exec <thread>`, is dropped from the record and left alone. Removing a machine removes its space from the app, while its terminals keep running in the pylon. Typing into those terminals is not human activity in Nexus, except a prompt you submit to Claude Code. So the pylon still pauses 20 minutes after the last human activity while the app shows it, and the app reconnects once the pylon runs again.
+A recorded machine that you removed, or replaced with one that is not reached through `nexus exec <thread>`, is dropped from the record and left alone. `nexus.attachedFrom` records the space each Attach left, for the way back.
+
+Removing a machine removes its space from the app, while its terminals keep running in the pylon. Typing into those terminals is not human activity in Nexus, except a prompt you submit to Claude Code. So the pylon still pauses 20 minutes after the last human activity while the app shows it, and the app reconnects once the pylon runs again.
