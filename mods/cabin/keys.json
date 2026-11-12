@@ -1,8 +1,0 @@
-{
-  "layout:cabin": {
-    "ctrl-f b": "cabin.tabs",
-    "ctrl-f a": "cabin.agents",
-    "ctrl-f tab": "cabin.back",
-    "ctrl-f m": "cabin.motion"
-  }
-}
