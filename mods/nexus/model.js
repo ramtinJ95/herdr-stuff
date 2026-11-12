@@ -152,6 +152,46 @@ export function gib(n) {
   return n >= 100 ? `${Math.round(n)} GiB` : `${n.toFixed(1)} GiB`;
 }
 
+/** A node card's words and measured meters. Reservations never stand in for an unread host reading. */
+export function clusterNode(n, health, now) {
+  const h = health?.data ?? null;
+  const c = n.capacity;
+  const p = n.pylons;
+  const meter = (text, used = null, total = null) => {
+    const ratio = used !== null && total > 0 ? used / total : null;
+    return { text, percent: ratio === null ? null : Math.max(0, Math.min(100, ratio * 100)),
+      tone: ratio >= 0.9 ? "blocked" : ratio >= 0.75 ? "ansi3" : "muted" };
+  };
+  const load = h?.load;
+  const mem = h?.memory;
+  // Prefer live health disks (or an older probe's single disk); unread health uses observed disks, aged by "seen".
+  const disks = h === null ? c?.disks ?? [] : h.disks ?? (h.disk ? [{ ...h.disk, paths: [h.disk.path] }] : []);
+  const meters = [
+    load == null ? meter("Load unknown") : meter(`Load ${load.one.toFixed(2)} on ${h.cpus} CPUs · 5 minutes ${load.five.toFixed(2)} · 15 minutes ${load.fifteen.toFixed(2)}`, load.one, h.cpus),
+    mem == null ? meter("Memory unknown") : meter(`Memory ${gib(mem.totalGiB - mem.availableGiB)} used of ${gib(mem.totalGiB)}`, mem.totalGiB - mem.availableGiB, mem.totalGiB),
+    ...disks.length === 0 ? [meter("Disk unknown")] : disks.map((d) => meter(`Disk ${gib(d.totalGiB - d.freeGiB)} used of ${gib(d.totalGiB)}${disks.length > 1 && d.paths?.length ? ` · ${d.paths.join(", ")}` : ""}`, d.totalGiB - d.freeGiB, d.totalGiB)),
+  ];
+  // Before probes counted committed disk, committed memory was always zero, not a known reservation.
+  const committed = c == null ? "Committed capacity unknown" : `Committed: ${c.committedCpus ?? "unknown"} of ${c.cpus ?? "unknown"} CPUs · ${c.committedDiskGiB === undefined || c.committedMemoryGiB === undefined ? "unknown" : gib(c.committedMemoryGiB).replace(" GiB", "")} of ${c.memoryGiB === undefined ? "unknown GiB" : gib(c.memoryGiB)} memory · ${c.committedDiskGiB === undefined ? "unknown" : gib(c.committedDiskGiB)} disk`;
+  const tallies = p == null ? ["unknown (no observation yet)"] : [
+    ...p.up.pylons === 0 ? [] : [`${p.up.pylons} up holding ${p.up.cpus} CPUs and ${gib(p.up.memoryGiB)}`],
+    ...p.paused.pylons === 0 ? [] : [`${p.paused.pylons} paused needing ${gib(p.paused.memoryGiB)} to wake`],
+    ...p.archived.pylons === 0 ? [] : [`${p.archived.pylons} archived`],
+    ...p.crashed.pylons === 0 ? [] : [`${p.crashed.pylons} crashed needing ${gib(p.crashed.memoryGiB)} to retry`],
+    ...p.orphaned.length === 0 ? [] : [`${p.orphaned.length} orphaned (${p.orphaned.join(", ")})`],
+  ];
+  const temps = (h?.temperatures ?? []).slice().sort((a, b) => b.celsius - a.celsius).slice(0, 2).map((s) => `${s.sensor} ${Math.round(s.celsius)}°C`);
+  const busy = (h?.pylons ?? []).slice().sort((a, b) => b.cpuPercent - a.cpuPercent).slice(0, 1).map((p) => `busiest ${p.pylonId.replace(/^pylon-/, "")} ${Math.round(p.cpuPercent)}% CPU`);
+  return {
+    status: `${n.state} · ${n.observedAt == null ? "never observed" : `seen ${ago(Date.parse(n.observedAt), now)}`}`,
+    meters, committed: `${committed}${n.overcommitted ? " · overcommitted" : ""}`,
+    pylons: `Pylons: ${tallies.length === 0 ? "none" : tallies.join(", ")}`,
+    pylonsTone: p?.crashed.pylons || p?.orphaned.length ? "blocked" : "muted",
+    healthError: health?.error ? `Health could not be read: ${health.error}` : h === null ? "Health unknown" : null,
+    detail: [...temps, ...busy].join(" · "),
+  };
+}
+
 /** Like the CLI's tokenCount: 1.2k, 34M, 8.9B. */
 export function tokens(n) {
   if (n < 1000) return String(n);

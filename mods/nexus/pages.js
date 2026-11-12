@@ -1,7 +1,7 @@
 // The panel's pages other than a thread: the thread lists, the start form, pipeline items, the cluster and usage.
 import { div } from "gpui-kit";
 import { v_flex, h_flex, Textarea } from "gpui-base";
-import { ago, attentionLabel, byProject, gib, inFlight, itemGroups, lastActivity, needsYou, tokens, unstarted } from "./model.js";
+import { ago, attentionLabel, byProject, clusterNode, inFlight, itemGroups, lastActivity, needsYou, tokens, unstarted } from "./model.js";
 
 function threadRow(app, ui, r, now) {
   const { t, dot, tone } = ui;
@@ -75,8 +75,9 @@ export function itemsPage(app, ui, now) {
   }), ...g.key === "done" ? [line("The 20 most recently added of the finished items.", t.dim)] : []]);
 }
 
-const bar = (ui, used, total, color) => div().mt(3).h(6).w_full().rounded(3).bg(ui.t.border)
-  .child(div().h_full().rounded(3).bg(color).w(/** @type {`${number}%`} */ (`${Math.max(0, Math.min(100, (used / total) * 100)).toFixed(1)}%`)));
+const bar = (ui, meter) => div().mt(3).h(6).w_full().rounded(3).bg(ui.t.border)
+  .children(meter.percent === null ? [] : [div().h_full().rounded(3).bg(ui.t[meter.tone])
+    .w(/** @type {`${number}%`} */ (`${meter.percent.toFixed(1)}%`))]);
 
 export function clusterPage(app, ui, now) {
   const { t, heading, line, card } = ui;
@@ -91,32 +92,20 @@ export function clusterPage(app, ui, now) {
   }
   out.push(heading("Nodes"));
   for (const n of nodes) {
-    const h = health[n.name] ?? null;
-    const c = n.capacity;
-    const mem = h?.memory;
-    const p = n.pylons;
+    const node = clusterNode(n, health[n.name], now);
     out.push(card(`node-${n.name}`, n.state === "online" ? t.border : t.blocked)
       .child(h_flex().gap(8).items_center()
         .child(div().size(8).rounded(4).bg(n.state === "online" ? t.done : t.blocked))
         .child(div().flex_1().text_size(13).font_semibold().text_color(t.foreground).child(n.name))
-        .child(div().text_size(11.5).text_color(t.dim).child(`${n.state} · seen ${ago(Date.parse(n.observedAt), now)}${n.overcommitted ? " · overcommitted" : ""}`)))
-      .child(line(`CPU ${c.committedCpus}/${c.cpus} committed${h ? ` · load ${h.load.one} ${h.load.five} ${h.load.fifteen}` : ""}`))
-      .child(bar(ui, c.committedCpus, c.cpus, t.accent))
-      .child(line(`Memory ${c.committedMemoryGiB}/${Math.round(c.memoryGiB)} GiB committed${mem ? ` · ${gib(mem.availableGiB)} available` : ""}`))
-      .child(bar(ui, mem ? mem.totalGiB - mem.availableGiB : c.committedMemoryGiB, mem ? mem.totalGiB : c.memoryGiB, t.working))
-      .children(c.disks.map((dk, i) => v_flex().id(`disk-${n.name}-${i}`)
-        .child(line(`Disk ${gib(dk.totalGiB - dk.freeGiB)} used of ${gib(dk.totalGiB)}${dk.pylons ? ` · pylons commit ${c.committedDiskGiB} GiB` : ""}`))
-        .child(bar(ui, dk.totalGiB - dk.freeGiB, dk.totalGiB, dk.freeGiB / dk.totalGiB < 0.1 ? t.blocked : t.done))))
-      .child(line(`Pylons: ${p.up.pylons} up, ${p.paused.pylons} paused, ${p.archived.pylons} archived${p.crashed.pylons ? `, ${p.crashed.pylons} crashed` : ""}${p.orphaned.length ? `, ${p.orphaned.length} orphaned` : ""}`, p.crashed.pylons || p.orphaned.length ? t.blocked : t.muted))
-      .children(h === null ? [] : [line(hottest(h), t.dim)]));
+        .child(div().text_size(11.5).text_color(t.dim).child(node.status)))
+      .children(node.healthError === null ? [] : [line(node.healthError, t.blocked)])
+      .children(node.meters.map((meter, i) => v_flex().id(`meter-${n.name}-${i}`)
+        .child(line(meter.text)).child(bar(ui, meter))))
+      .child(line(node.committed, n.overcommitted ? t.blocked : t.muted))
+      .child(line(node.pylons, t[node.pylonsTone]))
+      .children(node.detail ? [line(node.detail, t.dim)] : []));
   }
   return out;
-}
-
-function hottest(h) {
-  const temps = (h.temperatures ?? []).slice().sort((a, b) => b.celsius - a.celsius).slice(0, 2).map((s) => `${s.sensor} ${Math.round(s.celsius)}°C`);
-  const busy = (h.pylons ?? []).slice().sort((a, b) => b.cpuPercent - a.cpuPercent).slice(0, 1).map((p) => `busiest ${p.pylonId.replace(/^pylon-/, "")} ${Math.round(p.cpuPercent)}% CPU`);
-  return [...temps, ...busy].join(" · ");
 }
 
 export const usagePeriods = [["today", "Today"], ["7d", "7 days"], ["30d", "30 days"], ["all", "All"]];

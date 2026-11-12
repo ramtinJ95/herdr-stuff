@@ -368,7 +368,8 @@ export default class Nexus extends View {
       if (tab === "cluster") {
         const [nodes, release] = await Promise.all([call(this.conn, "GET", "/v1/nodes"), call(this.conn, "GET", "/v1/release").catch(() => null)]);
         const health = Object.fromEntries(await Promise.all(nodes.map(async (n) =>
-          [n.name, await call(this.conn, "GET", `/v1/nodes/${encodeURIComponent(n.name)}/health`).catch(() => null)])));
+          [n.name, await call(this.conn, "GET", `/v1/nodes/${encodeURIComponent(n.name)}/health`)
+            .then((data) => ({ data, error: null }), (e) => ({ data: null, error: e instanceof Error ? e.message : String(e) }))])));
         page.data = { nodes, release, health };
       }
       page.error = null;

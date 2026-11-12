@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { arrivalKey, arrivals, askBody, attentionOf, byProject, changesThreads, inFlight, itemGroups, landOffer, machineName, machineVia, openItems, needsYou, openQuestions, pick, showSteps, strayMachines, unstarted, workerTerminal, presenceDue } from "./model.js";
+import { arrivalKey, arrivals, askBody, attentionOf, byProject, changesThreads, clusterNode, inFlight, itemGroups, landOffer, machineName, machineVia, openItems, needsYou, openQuestions, pick, showSteps, strayMachines, unstarted, workerTerminal, presenceDue } from "./model.js";
 
 const row = (id, over = {}) => ({
   id, title: id, project: "p", status: "active", attention: null, working: false, createdAt: 1,
@@ -149,4 +149,149 @@ test("presenceDue posts for the shown open thread's machine, at most once per in
   assert.equal(presenceDue("th-000000000001", open, 1_000, 241_000, 240_000), "th-000000000001");
   assert.equal(presenceDue("th-000000000002", open, undefined, 1_000, 240_000), null, "a thread no longer open");
   assert.equal(presenceDue(null, open, undefined, 1_000, 240_000), null, "this computer's space");
+});
+
+const nodeFixture = (name = "infra-testbench") => {
+  const infra = name === "infra-testbench";
+  const disk = { paths: ["/pylons"], totalGiB: infra ? 930 : 952, freeGiB: infra ? 511 : 876.2, pylons: true };
+  const empty = { pylons: 0, cpus: 0, memoryGiB: 0 };
+  const n = { name, state: "online", observedAt: "2026-01-01T00:00:00Z", overcommitted: false,
+    capacity: { cpus: 16, committedCpus: infra ? 2 : 0, memoryGiB: infra ? 31 : 23,
+      committedMemoryGiB: infra ? 4 : 0, committedDiskGiB: infra ? 50 : 60, disks: [disk] },
+    pylons: { up: infra ? { pylons: 1, cpus: 2, memoryGiB: 4 } : empty,
+      paused: empty, archived: empty, crashed: empty, orphaned: [] } };
+  const h = { cpus: 16, load: infra ? { one: 1.6, five: 0.99, fifteen: 0.68 } : { one: 0.59, five: 0.38, fifteen: 0.25 },
+    memory: { totalGiB: infra ? 31 : 23, availableGiB: infra ? 25.8 : 19.1 },
+    disks: [disk], disk: { path: "/pylons", totalGiB: disk.totalGiB, freeGiB: disk.freeGiB },
+    temperatures: null, pylons: null };
+  return { n, h };
+};
+const nodeNow = Date.parse("2026-01-01T00:01:00Z");
+const cardFor = (n, h) => clusterNode(n, { data: h, error: null }, nodeNow);
+
+test("infra-testbench's words and meters measure host readings, not reservations", () => {
+  const { n, h } = nodeFixture();
+  const card = cardFor(n, h);
+  assert.equal(card.status, "online · seen 1m ago");
+  assert.deepEqual(card.meters.map((m) => m.text), [
+    "Load 1.60 on 16 CPUs · 5 minutes 0.99 · 15 minutes 0.68",
+    "Memory 5.2 GiB used of 31.0 GiB",
+    "Disk 419 GiB used of 930 GiB",
+  ]);
+  const expected = [1.6 / 16, 5.2 / 31, 419 / 930];
+  card.meters.forEach((m, i) => {
+    assert.ok(Math.abs(m.percent - expected[i] * 100) < 1e-10);
+    assert.equal(m.tone, "muted");
+  });
+  assert.equal(card.committed, "Committed: 2 of 16 CPUs · 4.0 of 31.0 GiB memory · 50.0 GiB disk");
+  assert.equal(card.pylons, "Pylons: 1 up holding 2 CPUs and 4.0 GiB");
+});
+
+test("rj-firebat's zero commitments do not zero its measured load or memory", () => {
+  const { n, h } = nodeFixture("rj-firebat");
+  const card = cardFor(n, h);
+  assert.deepEqual(card.meters.map((m) => m.text), [
+    "Load 0.59 on 16 CPUs · 5 minutes 0.38 · 15 minutes 0.25",
+    "Memory 3.9 GiB used of 23.0 GiB",
+    "Disk 75.8 GiB used of 952 GiB",
+  ]);
+  const expected = [0.59 / 16, 3.9 / 23, 75.8 / 952];
+  card.meters.forEach((m, i) => assert.ok(Math.abs(m.percent - expected[i] * 100) < 1e-10));
+  assert.equal(card.committed, "Committed: 0 of 16 CPUs · 0.0 of 23.0 GiB memory · 60.0 GiB disk");
+});
+
+test("null host load and memory say unknown and never draw commitments", () => {
+  const { n, h } = nodeFixture();
+  for (const [field, index, label] of [["load", 0, "Load"], ["memory", 1, "Memory"]]) {
+    const card = cardFor(n, { ...h, [field]: null });
+    assert.equal(card.meters[index].text, `${label} unknown`);
+    assert.equal(card.meters[index].percent, null);
+    assert.notEqual(card.meters[2].percent, null);
+  }
+});
+
+test("unread health keeps the error visible and uses observed disk usage, not reservations", () => {
+  const { n } = nodeFixture();
+  const card = clusterNode(n, { data: null, error: "probe unreachable" }, nodeNow);
+  assert.equal(card.healthError, "Health could not be read: probe unreachable");
+  assert.deepEqual(card.meters.slice(0, 2).map((m) => [m.text, m.percent]), [["Load unknown", null], ["Memory unknown", null]]);
+  assert.equal(card.meters[2].text, "Disk 419 GiB used of 930 GiB");
+  assert.equal(card.meters[2].percent, 419 / 930 * 100);
+  assert.equal(clusterNode(n, undefined, nodeNow).healthError, "Health unknown");
+  assert.equal(clusterNode(n, undefined, nodeNow).meters[2].percent, card.meters[2].percent);
+});
+
+test("unread health without observed disks leaves disk usage unknown", () => {
+  const { n } = nodeFixture();
+  delete n.capacity.disks;
+  const card = clusterNode(n, { data: null, error: "forbidden" }, nodeNow);
+  assert.equal(card.meters[2].text, "Disk unknown");
+  assert.equal(card.meters[2].percent, null);
+  assert.equal(card.healthError, "Health could not be read: forbidden");
+});
+
+test("live disks take precedence over observed disks, including the legacy health reading", () => {
+  const { n, h } = nodeFixture();
+  n.capacity.disks = [{ paths: ["/stale"], totalGiB: 100, freeGiB: 10 }];
+  assert.equal(cardFor(n, h).meters[2].text, "Disk 419 GiB used of 930 GiB");
+  delete h.disks;
+  assert.equal(cardFor(n, h).meters[2].text, "Disk 419 GiB used of 930 GiB");
+});
+
+test("never-observed nodes render unknown capacity and pylons without parsing a null timestamp", () => {
+  const { n, h } = nodeFixture();
+  const unobserved = { ...n, capacity: null, observedAt: null, pylons: null };
+  const card = clusterNode(unobserved, undefined, nodeNow);
+  assert.equal(card.status, "online · never observed");
+  assert.equal(card.committed, "Committed capacity unknown");
+  assert.equal(card.pylons, "Pylons: unknown (no observation yet)");
+  assert.ok(card.meters.every((m) => m.percent === null));
+  assert.equal(cardFor(unobserved, h).meters[0].percent, 10, "a live reading needs no capacity snapshot");
+});
+
+test("old probes without disks use the measured legacy disk; missing readings stay unknown", () => {
+  const { n, h } = nodeFixture();
+  delete n.capacity.disks;
+  delete h.disks;
+  assert.equal(cardFor(n, h).meters[2].text, "Disk 419 GiB used of 930 GiB");
+  delete h.disk;
+  assert.equal(cardFor(n, h).meters[2].percent, null);
+  delete n.capacity.committedCpus;
+  delete n.capacity.committedDiskGiB;
+  n.capacity.committedMemoryGiB = 0;
+  assert.equal(cardFor(n, h).committed, "Committed: unknown of 16 CPUs · unknown of 31.0 GiB memory · unknown disk");
+  delete n.capacity.cpus;
+  delete n.capacity.memoryGiB;
+  assert.equal(cardFor(n, h).committed, "Committed: unknown of unknown CPUs · unknown of unknown GiB memory · unknown disk");
+});
+
+test("every meter shares the 75/90 percent rule, saturates at full, and keeps real words", () => {
+  const { n, h } = nodeFixture();
+  n.capacity.cpus = 1; // The denominator must be the host health's CPU count, not the registry.
+  for (const [used, tone] of [[0, "muted"], [74, "muted"], [75, "ansi3"], [89, "ansi3"], [90, "blocked"], [120, "blocked"]]) {
+    const card = cardFor(n, { ...h, cpus: 100, load: { one: used, five: 0, fifteen: 0 },
+      memory: { totalGiB: 100, availableGiB: 100 - used }, disks: [{ paths: ["/a"], totalGiB: 100, freeGiB: 100 - used }] });
+    assert.deepEqual(card.meters.map((m) => [m.percent, m.tone]), Array(3).fill([Math.min(100, used), tone]));
+    assert.match(card.meters[0].text, new RegExp(`Load ${used}.00 on 100 CPUs`));
+  }
+  assert.equal(cardFor(n, { ...h, cpus: 0 }).meters[0].percent, null);
+});
+
+test("each measured filesystem has its own row, while reservations and wake needs are separate", () => {
+  const { n, h } = nodeFixture();
+  h.disks.push({ paths: ["/data", "/cache"], totalGiB: 100, freeGiB: 10 });
+  n.overcommitted = true;
+  n.pylons.paused = { pylons: 2, cpus: 4, memoryGiB: 8 };
+  n.pylons.crashed = { pylons: 1, cpus: 2, memoryGiB: 4 };
+  n.pylons.orphaned = ["pylon-stray"];
+  const card = cardFor(n, h);
+  assert.equal(card.meters[2].text, "Disk 419 GiB used of 930 GiB · /pylons");
+  assert.equal(card.meters[3].text, "Disk 90.0 GiB used of 100 GiB · /data, /cache");
+  assert.equal(card.meters[3].tone, "blocked");
+  assert.equal(card.committed, "Committed: 2 of 16 CPUs · 4.0 of 31.0 GiB memory · 50.0 GiB disk · overcommitted");
+  assert.equal(card.pylons, "Pylons: 1 up holding 2 CPUs and 4.0 GiB, 2 paused needing 8.0 GiB to wake, 1 crashed needing 4.0 GiB to retry, 1 orphaned (pylon-stray)");
+  assert.equal(card.pylonsTone, "blocked");
+  n.capacity.disks = [...h.disks];
+  const unread = clusterNode(n, { data: null, error: "forbidden" }, nodeNow);
+  assert.deepEqual(unread.meters.slice(2), card.meters.slice(2), "observed filesystems keep paths and meter semantics");
 });
