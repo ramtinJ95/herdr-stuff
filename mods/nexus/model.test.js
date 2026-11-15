@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { arrivalKey, arrivals, askBody, attachedThreads, attentionOf, byProject, changesThreads, clusterNode, inFlight, itemGroups, landOffer, machineName, machineVia, openItems, needsYou, openQuestions, pick, pylonMachine, reviewStarts, showSteps, strayMachines, stuckLines, unstarted, workerTerminal, presenceDue } from "./model.js";
+import { arrivalKey, arrivals, askBody, attachedThreads, attentionOf, byProject, changesThreads, clusterNode, placementRows, inFlight, itemGroups, landOffer, machineName, machineVia, openItems, needsYou, openQuestions, pick, pylonMachine, reviewStarts, showSteps, strayMachines, stuckLines, unstarted, workerTerminal, presenceDue } from "./model.js";
 
 const row = (id, over = {}) => ({
   id, title: id, project: "p", status: "active", attention: null, working: false, createdAt: 1,
@@ -396,4 +396,25 @@ test("admission distinguishes stale samples, pending boots, held room, offline n
   assert.deepEqual(offline.admission.map((l) => l.tone), ["blocked", "blocked"]);
   assert.match(cardFor(n, h).admission[0].text, /Placement unknown/);
   assert.equal(cardFor(n, h).admission[0].tone, "blocked");
+});
+
+test("the compact card reads the host in a few words, the fullest disk standing for all", () => {
+  const { n, h } = nodeFixture();
+  h.disks.push({ paths: ["/data"], totalGiB: 100, freeGiB: 5 });
+  n.pylons.paused = { pylons: 2, cpus: 4, memoryGiB: 8 };
+  const s = clusterNode(n, { data: h }, nodeNow, admissionFixture(), defaultSize).summary;
+  assert.deepEqual(s.meters.map((m) => [m.label, m.value, m.tone]), [["Load", "1.60 on 16 CPUs", "muted"], ["Memory", "5.2 of 31.0 GiB", "muted"], ["Fullest disk", "95.0 of 100 GiB", "blocked"]]);
+  assert.deepEqual(s.pylons, { text: "1 up · 2 paused", tone: "muted" });
+  const unknown = clusterNode({ ...n, pylons: null }, undefined, nodeNow).summary;
+  assert.equal(unknown.pylons.text, "Pylons unknown");
+  assert.deepEqual(unknown.meters.map((m) => m.value).slice(0, 2), ["unknown", "unknown"]);
+});
+
+test("placement rows follow the page's nodes, keep the scheduler's verdict, and name the nearest node's shortfall", () => {
+  const report = { nodes: [{ node: "b", admitted: false }, { node: "a", admitted: true }, { node: "c", admitted: false }], nearest: { node: "b", missingGiB: 1.23 } };
+  assert.deepEqual(placementRows(report, ["a", "b", "gone"]), [
+    { node: "a", fits: true, text: "fits", tone: "done" },
+    { node: "b", fits: false, text: "does not fit · needs 1.3 GiB more memory", tone: "blocked" },
+    { node: "c", fits: false, text: "does not fit", tone: "blocked" },
+  ]);
 });

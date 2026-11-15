@@ -2,7 +2,7 @@
 // review and changes, the pipeline items, the cluster and usage.
 // Docked as a pane (pane.split {mod: "nexus"}) or as a floating window (mod.open:nexus); each can switch to the other.
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, TextareaState } from "gpui-base";
+import { v_flex, h_flex, ScrollHandle, TextareaState } from "gpui-base";
 import { closeOverlay, exec, focused, machines, nextCommand, notify, panes, props, run, setShared, shared, spaces, theme, window as appWindow } from "herdr";
 import { call, connect, follow, latestCursor, requestId } from "./api.js";
 import { ago, arrivalKey, arrivals, askBody, attachedThreads, attentionLabel, attentionOf, changesThreads, countOpen, inFlight, needsYou, openItems, openQuestions, pick, presenceDue, workerTerminal } from "./model.js";
@@ -10,7 +10,8 @@ import { addMachine, detachMachine, reconcileMachines, showMachine } from "./mac
 import { applyClaude, applyHarness, emptyLive } from "./transcript.js";
 import { kit } from "./ui.js";
 import { pageBlocks, threadView } from "./thread.js";
-import { clusterPage, itemsPage, startForm, threadList, usagePage } from "./pages.js";
+import { clusterPage, geometry, itemsPage, startForm, threadList, usagePage } from "./pages.js";
+import { charts, historyOf, rangeMs, rangeOf, slotter } from "./graphs.js";
 
 const pollMs = 3_000;
 /** Archiving and other changes that emit no event still show within this long; so do a shown page's items, nodes and usage. */
@@ -24,6 +25,7 @@ const presenceMs = 240_000;
 const presenceKey = "nexus.presence";
 const viewKey = "nexus.view";
 const notifiedKey = "nexus.notified";
+const graphRangeKey = "nexus.graphRange";
 const pageTabs = ["items", "cluster", "usage"];
 const attachedRowPx = 36;
 /** Keeps a press from dragging the window, so the control under it gets it. */
@@ -73,7 +75,21 @@ export default class Nexus extends View {
     this.pages = {};
     this.admissionProject = null;
     this.admissionRequest = 0;
+    // The Cluster page's node cards opened to their details and graphs, each one's graphs, and the lines hidden.
+    this.openNodes = new Set();
+    this.metrics = new Map();
+    // Each node's colour slots, so a pylon keeps its colour across ranges and refreshes while the panel runs.
+    this.metricSlots = new Map();
+    this.graphRange = rangeOf(shared(graphRangeKey) ?? null);
+    this.hiddenLines = new Set();
+    this.releaseOpen = false;
     this.usagePeriod = "7d";
+    // The body's scroll, which a thread's conversation is brought to its newest entry by.
+    this.bodyScroll = ScrollHandle.new();
+    // The thread the body is to be scrolled to the newest entry of at the next render, and the thread whose next
+    // conversation update is to scroll there, as after a message sent to it.
+    this.toLatest = null;
+    this.latestOnUpdate = null;
     cx.spawn(async (cx) => {
       try {
         this.conn = await connect();
@@ -295,7 +311,14 @@ export default class Nexus extends View {
           await follow(this.conn, path, ({ data }) => {
             if (!mine()) return false;
             if (data === null) return true;
+            // The conversation reads oldest first, so once it has loaded, or the message sent to it shows, the body is
+            // brought to its newest entry.
+            const latest = !this.live.loaded || this.latestOnUpdate === id;
             this.live = { ...apply(this.live, data), error: null };
+            if (latest) {
+              this.latestOnUpdate = null;
+              this.scrollToLatest(cx, id);
+            }
             delay = 1_000;
             cx.notify();
             return true;
@@ -345,6 +368,8 @@ export default class Nexus extends View {
     setShared(viewKey, this.view);
     this.confirm = null;
     if (leaving) {
+      this.toLatest = null;
+      this.latestOnUpdate = null;
       this.stream = null;
       this.live = null;
       this.detail = null;
@@ -376,14 +401,14 @@ export default class Nexus extends View {
           [n.name, await call(this.conn, "GET", `/v1/nodes/${encodeURIComponent(n.name)}/health`)
             .then((data) => ({ data, error: null }), (e) => ({ data: null, error: e instanceof Error ? e.message : String(e) }))])));
         page.data = { nodes, release, health };
-        await this.loadAdmission(cx);
+        await Promise.all([this.loadAdmission(cx), ...[...this.openNodes].filter((name) => nodes.some((n) => n.name === name)).map((name) => this.loadMetrics(cx, name))]);
       }
       page.error = null;
     } catch (e) {
       page.error = e instanceof Error ? e.message : String(e);
       if (tab === "cluster") {
         this.admissionRequest++;
-        page.admission = { data: null, error: `Placement unknown — cluster refresh failed: ${page.error}` };
+        page.admission = { data: null, error: `The cluster refresh failed: ${page.error}` };
       }
     }
     cx.notify();
@@ -409,9 +434,56 @@ export default class Nexus extends View {
       if (request === this.admissionRequest) page.admission = { data, error: null };
     } catch (e) {
       if (request === this.admissionRequest) page.admission = { data: null, error: e.status === 404
-        ? "Placement report unavailable. Update the Nexus control plane, or select an existing project."
-        : `Placement could not be read: ${e instanceof Error ? e.message : String(e)}` };
+        ? "Update the Nexus control plane for its placement report, or select an existing project."
+        : `The report could not be read: ${e instanceof Error ? e.message : String(e)}` };
     }
+    cx.notify();
+  }
+
+  /** Opens a node card to its details and graphs, or closes it. */
+  toggleNode(cx, name) {
+    if (this.openNodes.delete(name)) return cx.notify();
+    this.openNodes.add(name);
+    if (!this.metricSlots.has(name)) this.metricSlots.set(name, slotter());
+    cx.spawn(async (cx) => this.loadMetrics(cx, name));
+    cx.notify();
+  }
+
+  setGraphRange(cx, range) {
+    this.graphRange = rangeOf(range);
+    setShared(graphRangeKey, this.graphRange);
+    for (const name of this.openNodes) cx.spawn(async (cx) => this.loadMetrics(cx, name));
+  }
+
+  /**
+   * Reads a node's graphs for the picked range and builds their geometry here, a chart at a time, since a render that
+   * builds a day's worth is stopped for running too long. A card keeps the graphs it shows meanwhile, unless they are
+   * another range's; an older request's answer is dropped. A failure clears them, so they never pass as current.
+   */
+  async loadMetrics(cx, name) {
+    if (this.conn === null) return;
+    const range = this.graphRange;
+    const was = this.metrics.get(name);
+    const request = (was?.request ?? 0) + 1;
+    const current = () => this.metrics.get(name)?.request === request;
+    this.metrics.set(name, { request, range, drawn: was?.range === range ? was.drawn : null, error: null });
+    cx.notify();
+    const to = Date.now();
+    let data;
+    try {
+      data = await call(this.conn, "GET", `/v1/nodes/${encodeURIComponent(name)}/metrics?from=${to - rangeMs(range)}&to=${to}`);
+    } catch (e) {
+      if (current()) this.metrics.set(name, { request, range, drawn: null, error: e.status === 404 ? "Graphs need a newer Nexus control plane." : `The graphs could not load: ${e instanceof Error ? e.message : String(e)}` });
+      return cx.notify();
+    }
+    const h = historyOf(data);
+    const drawn = [];
+    for (const chart of charts) {
+      if (!current()) return;
+      drawn.push(geometry(chart, h, this.metricSlots.get(name)));
+      await cx.sleep(0);
+    }
+    if (current()) this.metrics.set(name, { request, range, drawn, error: null });
     cx.notify();
   }
 
@@ -480,6 +552,21 @@ export default class Nexus extends View {
     });
   }
 
+  /**
+   * Scrolls the body to the thread's newest entry while it is shown. Its entries' Markdown takes a few frames to reach
+   * its height, so the scroll is asked again over the next second, and stops once another thread is shown.
+   */
+  scrollToLatest(cx, thread) {
+    cx.spawn(async (cx) => {
+      for (const wait of [0, 120, 250, 400]) {
+        if (wait > 0) await cx.sleep(wait);
+        if (this.view.thread !== thread) return;
+        this.toLatest = thread;
+        cx.notify();
+      }
+    });
+  }
+
   /** `followUp` waits for the current turn; `steer` joins a Nexus agent's run after its current tool round. */
   sendMessage(cx, id, mode) {
     const text = this.message.value().trim();
@@ -487,6 +574,7 @@ export default class Nexus extends View {
     this.act(cx, mode === "steer" ? "Steering" : "Sending", async () => {
       await this.post(`/v1/threads/${encodeURIComponent(id)}/messages`, { text, requestId: requestId("msg"), mode });
       this.message.set_value("");
+      if (this.view.thread === id) this.latestOnUpdate = id;
     });
   }
 
@@ -691,6 +779,11 @@ export default class Nexus extends View {
       : this.view.tab === "cluster" ? clusterPage(this, ui, now)
       : this.view.tab === "usage" ? usagePage(this, ui)
       : threadList(this, ui, now);
+    // The body's last child is the thread's composer, under its newest entry.
+    if (this.toLatest !== null) {
+      if (this.toLatest === this.view.thread) this.bodyScroll.scroll_to_item(body.length - 1);
+      this.toLatest = null;
+    }
     const statusText = this.status.text || (this.syncedAt === null ? "" : `${countOpen(this.rows)} open · synced ${ago(this.syncedAt, now)}`);
 
     // The window drags by its header; presses below it stay with the tabs, rows, text and fields.
@@ -715,7 +808,7 @@ export default class Nexus extends View {
         .child(tab("items", "Queued"))
         .child(tab("cluster", "Cluster"))
         .child(tab("usage", "Usage")))
-      .child(v_flex().id("body").flex_1().min_h(0).px(12).pb(12).overflow_y_scrollbar().on_mouse_down("left", stop).children(body))
+      .child(v_flex().id("body").flex_1().min_h(0).px(12).pb(12).overflow_y_scrollbar().track_scroll(this.bodyScroll).on_mouse_down("left", stop).children(body))
       .child(h_flex().flex_none().h(26).px(12).items_center().border_t_1().border_color(t.border)
         .child(div().truncate().text_size(11).text_color(this.status.level === "error" ? t.blocked : t.dim).child(statusText)));
   }

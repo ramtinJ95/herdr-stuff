@@ -219,7 +219,24 @@ export function clusterNode(n, health, now, admission = null, resources = null) 
   ];
   const temps = (h?.temperatures ?? []).slice().sort((a, b) => b.celsius - a.celsius).slice(0, 2).map((s) => `${s.sensor} ${Math.round(s.celsius)}°C`);
   const busy = (h?.pylons ?? []).slice().sort((a, b) => b.cpuPercent - a.cpuPercent).slice(0, 1).map((p) => `busiest ${p.pylonId.replace(/^pylon-/, "")} ${Math.round(p.cpuPercent)}% CPU`);
+  // The card's one row of meters: the fullest disk stands for them all, as each has its own row in the details.
+  const fullest = disks.length === 0 ? -1 : disks.reduce((best, d, i) => (meters[2 + i].percent ?? -1) > (meters[2 + best].percent ?? -1) ? i : best, 0);
+  const d = disks[fullest];
+  const small = (label, value, m) => ({ label, value, percent: m.percent, tone: m.tone });
+  const summary = {
+    meters: [
+      small("Load", load == null ? "unknown" : `${load.one.toFixed(2)} on ${h.cpus} CPUs`, meters[0]),
+      small("Memory", mem == null ? "unknown" : `${gib(mem.totalGiB - mem.availableGiB).replace(" GiB", "")} of ${gib(mem.totalGiB)}`, meters[1]),
+      d === undefined ? small("Disk", "unknown", meters[2]) : small(disks.length > 1 ? "Fullest disk" : "Disk", `${gib(d.totalGiB - d.freeGiB).replace(" GiB", "")} of ${gib(d.totalGiB)}`, meters[2 + fullest]),
+    ],
+    pylons: p == null ? { text: "Pylons unknown", tone: "muted" } : {
+      text: [p.up.pylons && `${p.up.pylons} up`, p.paused.pylons && `${p.paused.pylons} paused`, p.crashed.pylons && `${p.crashed.pylons} crashed`, p.orphaned.length && `${p.orphaned.length} orphaned`]
+        .filter(Boolean).join(" · ") || "No pylons",
+      tone: p.crashed.pylons || p.orphaned.length ? "blocked" : "muted",
+    },
+  };
   return {
+    summary,
     status: `${n.state} · ${n.observedAt == null ? "never observed" : `seen ${ago(Date.parse(n.observedAt), now)}`}`,
     meters, committed: `${committed}${n.overcommitted ? " · overcommitted" : ""}`,
     committedTone: n.overcommitted || admission?.admitted === false ? "blocked" : "muted",
@@ -229,6 +246,20 @@ export function clusterNode(n, health, now, admission = null, resources = null) 
     healthError: health?.error ? `Health could not be read: ${health.error}` : h === null ? "Health unknown" : null,
     detail: [...temps, ...busy].join(" · "),
   };
+}
+
+/**
+ * The Placement section's verdict per node, in the page's node order (`names`), then any the report names alone: whether
+ * the project's default-sized pylon fits, as the scheduler decided it, and for the nearest node what memory it lacks.
+ */
+export function placementRows(report, names) {
+  const order = [...names, ...report.nodes.map((a) => a.node)].filter((n, i, all) => all.indexOf(n) === i);
+  return order.flatMap((node) => {
+    const a = report.nodes.find((r) => r.node === node);
+    if (a === undefined) return [];
+    const short = report.nearest?.node === node ? ` · needs ${(Math.ceil(report.nearest.missingGiB * 10) / 10).toFixed(1)} GiB more memory` : "";
+    return [{ node, fits: a.admitted, text: a.admitted ? "fits" : `does not fit${short}`, tone: a.admitted ? "done" : "blocked" }];
+  });
 }
 
 /** Format the control plane's decision; never reconstruct its admission rule from host readings. */
