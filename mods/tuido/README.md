@@ -11,6 +11,17 @@ A [Herdr app](https://herdr.dev) mod that shows your [tuido](https://github.com/
 
 It needs tuido 0.8 or later (`done --at`, `headings` in `ls --json`, `_lists --json` and `new`), installed on `PATH` and set up with `tuido init`.
 
+If `tuido upgrade` still reports 0.7 as the latest release, those features are on tuido's `main` branch but not yet released. Build that branch explicitly (`go install github.com/ramtinJ95/tuido/cmd/tuido@main`); `@latest` still selects the older release. Keep a copy of your existing binary if you need to roll back. An existing initialized todo root can be reused without running `tuido init` again.
+
+On macOS, a Finder-launched Herdr can have a different `PATH` from an interactive terminal. If the panel says `cannot run tuido: No such file or directory`, that means the executable is missing from Herdr's path, not that the todo root is wrong. For a standard Go install at `~/go/bin/tuido`, expose that same binary in the usual local bin directory (without replacing an existing entry):
+
+```sh
+mkdir -p ~/.local/bin
+ln -s "$HOME/go/bin/tuido" ~/.local/bin/tuido
+```
+
+Close and reopen the panel after fixing executable lookup. The mod obtains the todo root from `tuido sync --status`; no todo directory is hardcoded.
+
 Install it by linking it into the app's mods, then merge its `keys.json` into `~/.config/herdr-app/keys.json`. It binds `ctrl-f t` to toggle the window, and `ctrl-s` in the `mod:tuido` section to sync. The Sync button shows whichever key `tuido.sync` is bound to.
 
 ```sh
