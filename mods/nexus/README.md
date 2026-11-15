@@ -80,7 +80,7 @@ This is application-level proxy use, not a bridge between tailnets. Closing the 
 ## How it reads the control plane
 
 - **Lists:** it reads `GET /v1/threads?status=open`. It polls `GET /v1/events` every 3 seconds from the newest event, and reads the threads again when an event can change them. Every minute it reads everything, for changes no event names. It learns the newest event from a moment on `/v1/events?follow=true&since=latest` rather than reading the history, and reads the history only when the control plane has no stream to give.
-- **Conversation:** a shown thread's conversation follows `GET /v1/threads/<id>/claude/events`, or `/events` for a Nexus agent, as server-sent events. It shows the newest entry first and reconnects with backoff.
+- **Conversation:** a shown thread's conversation follows `GET /v1/threads/<id>/claude/events`, or `/events` for a Nexus agent, as server-sent events. It reads oldest first, as a chat does, with the composer under the newest entry, and reconnects with backoff. Opening a thread, or sending to it, scrolls to the newest entry; entries that stream in later do not move the view while you read, so **Jump to latest** brings it down.
   - `fetch` reads a body only whole, so the stream goes over a raw socket.
   - That socket speaks no TLS, so the stream goes to the plain API on port 7470 of the control plane's host.
   - Each copy of the panel holds one stream while a thread is shown. The control plane serves 16 streams in all.

@@ -2,7 +2,7 @@
 // review and changes, the pipeline items, the cluster and usage.
 // Docked as a pane (pane.split {mod: "nexus"}) or as a floating window (mod.open:nexus); each can switch to the other.
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, TextareaState } from "gpui-base";
+import { v_flex, h_flex, ScrollHandle, TextareaState } from "gpui-base";
 import { closeOverlay, exec, focused, machines, nextCommand, notify, panes, props, run, setShared, shared, spaces, theme, window as appWindow } from "herdr";
 import { call, connect, follow, latestCursor, requestId } from "./api.js";
 import { ago, arrivalKey, arrivals, askBody, attachedThreads, attentionLabel, attentionOf, changesThreads, countOpen, inFlight, needsYou, openItems, openQuestions, pick, presenceDue, workerTerminal } from "./model.js";
@@ -84,6 +84,12 @@ export default class Nexus extends View {
     this.hiddenLines = new Set();
     this.releaseOpen = false;
     this.usagePeriod = "7d";
+    // The body's scroll, which a thread's conversation is brought to its newest entry by.
+    this.bodyScroll = ScrollHandle.new();
+    // The thread the body is to be scrolled to the newest entry of at the next render, and the thread whose next
+    // conversation update is to scroll there, as after a message sent to it.
+    this.toLatest = null;
+    this.latestOnUpdate = null;
     cx.spawn(async (cx) => {
       try {
         this.conn = await connect();
@@ -305,7 +311,14 @@ export default class Nexus extends View {
           await follow(this.conn, path, ({ data }) => {
             if (!mine()) return false;
             if (data === null) return true;
+            // The conversation reads oldest first, so once it has loaded, or the message sent to it shows, the body is
+            // brought to its newest entry.
+            const latest = !this.live.loaded || this.latestOnUpdate === id;
             this.live = { ...apply(this.live, data), error: null };
+            if (latest) {
+              this.latestOnUpdate = null;
+              this.scrollToLatest(cx, id);
+            }
             delay = 1_000;
             cx.notify();
             return true;
@@ -355,6 +368,8 @@ export default class Nexus extends View {
     setShared(viewKey, this.view);
     this.confirm = null;
     if (leaving) {
+      this.toLatest = null;
+      this.latestOnUpdate = null;
       this.stream = null;
       this.live = null;
       this.detail = null;
@@ -537,6 +552,21 @@ export default class Nexus extends View {
     });
   }
 
+  /**
+   * Scrolls the body to the thread's newest entry while it is shown. Its entries' Markdown takes a few frames to reach
+   * its height, so the scroll is asked again over the next second, and stops once another thread is shown.
+   */
+  scrollToLatest(cx, thread) {
+    cx.spawn(async (cx) => {
+      for (const wait of [0, 120, 250, 400]) {
+        if (wait > 0) await cx.sleep(wait);
+        if (this.view.thread !== thread) return;
+        this.toLatest = thread;
+        cx.notify();
+      }
+    });
+  }
+
   /** `followUp` waits for the current turn; `steer` joins a Nexus agent's run after its current tool round. */
   sendMessage(cx, id, mode) {
     const text = this.message.value().trim();
@@ -544,6 +574,7 @@ export default class Nexus extends View {
     this.act(cx, mode === "steer" ? "Steering" : "Sending", async () => {
       await this.post(`/v1/threads/${encodeURIComponent(id)}/messages`, { text, requestId: requestId("msg"), mode });
       this.message.set_value("");
+      if (this.view.thread === id) this.latestOnUpdate = id;
     });
   }
 
@@ -748,6 +779,11 @@ export default class Nexus extends View {
       : this.view.tab === "cluster" ? clusterPage(this, ui, now)
       : this.view.tab === "usage" ? usagePage(this, ui)
       : threadList(this, ui, now);
+    // The body's last child is the thread's composer, under its newest entry.
+    if (this.toLatest !== null) {
+      if (this.toLatest === this.view.thread) this.bodyScroll.scroll_to_item(body.length - 1);
+      this.toLatest = null;
+    }
     const statusText = this.status.text || (this.syncedAt === null ? "" : `${countOpen(this.rows)} open · synced ${ago(this.syncedAt, now)}`);
 
     // The window drags by its header; presses below it stay with the tabs, rows, text and fields.
@@ -772,7 +808,7 @@ export default class Nexus extends View {
         .child(tab("items", "Queued"))
         .child(tab("cluster", "Cluster"))
         .child(tab("usage", "Usage")))
-      .child(v_flex().id("body").flex_1().min_h(0).px(12).pb(12).overflow_y_scrollbar().on_mouse_down("left", stop).children(body))
+      .child(v_flex().id("body").flex_1().min_h(0).px(12).pb(12).overflow_y_scrollbar().track_scroll(this.bodyScroll).on_mouse_down("left", stop).children(body))
       .child(h_flex().flex_none().h(26).px(12).items_center().border_t_1().border_color(t.border)
         .child(div().truncate().text_size(11).text_color(this.status.level === "error" ? t.blocked : t.dim).child(statusText)));
   }

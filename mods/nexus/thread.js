@@ -1,10 +1,11 @@
-// One thread: what it waits on you for, its review, its conversation as it streams, its changes, and the composer.
+// One thread: what it waits on you for, its review, its conversation as it streams, oldest first as a chat reads, its
+// changes, and the composer under them.
 import { div } from "gpui-kit";
 import { v_flex, h_flex, Textarea, TextView } from "gpui-base";
 import { ago, attentionLabel, landOffer, openQuestions, reviewStarts, stuckLines } from "./model.js";
 import { blocks, queued } from "./transcript.js";
 
-/** The newest blocks shown at first; Show earlier adds this many more. */
+/** How many of the newest blocks show at first, oldest of them on top; Show earlier adds this many more above. */
 export const pageBlocks = 40;
 
 export function threadView(app, ui, now) {
@@ -64,11 +65,12 @@ export function threadView(app, ui, now) {
     ...questionCards(app, ui, d),
     ...reviewSection(app, ui, d),
     ...prs,
-    composer(app, ui, d, open),
     h_flex().pt(14).gap(4)
       .child(chip("sub-conv", "Conversation", app.sub === "conversation", () => { app.sub = "conversation"; }))
       .child(chip("sub-changes", "Changes", app.sub === "changes", () => { app.sub = "changes"; })),
     ...app.sub === "changes" ? changesView(app, ui, id) : conversationView(app, ui, now),
+    // Last, so the main view's scroll to the newest entry shows the composer under it.
+    composer(app, ui, d, open),
   ];
 }
 
@@ -168,16 +170,22 @@ function conversationView(app, ui, now) {
   if (live.error && !live.loaded) return [line(`The conversation did not load: ${live.error}`, t.blocked)];
   if (!live.loaded) return [empty("Loading the conversation…")];
   const all = blocks(live);
-  const shown = all.slice(-app.shownBlocks).reverse();
+  const shown = all.slice(-app.shownBlocks);
   const waiting = queued(live);
   const top = [
-    line(`Newest first · ${all.length} entries${live.dropped > 0 ? `, ${live.dropped} older not kept` : ""}${live.error ? ` · reconnecting: ${live.error}` : ""}`, t.dim),
+    h_flex().pt(4).gap(8).items_center()
+      .child(div().flex_1().text_size(12).text_color(t.dim).child(`${all.length} entries${live.dropped > 0 ? `, ${live.dropped} older not kept` : ""}${live.error ? ` · reconnecting: ${live.error}` : ""}`))
+      .children(all.length === 0 ? [] : [div().id("to-latest").text_size(11.5).text_color(t.accent).cursor_pointer()
+        .on_click((_e, cx) => app.scrollToLatest(cx, app.view.thread)).child("Jump to latest ↓")]),
+    ...all.length > shown.length ? [h_flex().pt(10).justify_center().child(button("earlier", `Show ${Math.min(pageBlocks, all.length - shown.length)} earlier`, (cx) => { app.shownBlocks += pageBlocks; cx.notify(); }))] : [],
+  ];
+  // What comes next follows the newest entry: the turn under way, then the messages queued for after it.
+  const after = [
     ...live.working ? [line(live.kind === "claude" ? "Claude is working…" : "The agent is working…", t.working)] : [],
     ...waiting.map((text, i) => div().id(`queued-${i}`).mt(6).p(8).rounded(6).border_1().border_color(t.input).text_size(12).text_color(t.muted).child(`Queued: ${text}`)),
   ];
-  const more = all.length > shown.length ? [h_flex().pt(10).justify_center().child(button("earlier", `Show ${Math.min(pageBlocks, all.length - shown.length)} earlier`, (cx) => { app.shownBlocks += pageBlocks; cx.notify(); }))] : [];
-  if (all.length === 0) return [...top, empty("No messages yet.")];
-  return [...top, ...shown.map((b) => blockView(app, ui, b, now)), ...more];
+  if (all.length === 0) return [...top, empty("No messages yet."), ...after];
+  return [...top, ...shown.map((b) => blockView(app, ui, b, now)), ...after];
 }
 
 function blockView(app, ui, b, now) {
