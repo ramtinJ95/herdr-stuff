@@ -71,6 +71,8 @@ export default class Nexus extends View {
     this.confirm = null;
     this.confirmAt = 0;
     this.pages = {};
+    this.admissionProject = null;
+    this.admissionRequest = 0;
     this.usagePeriod = "7d";
     cx.spawn(async (cx) => {
       try {
@@ -374,10 +376,15 @@ export default class Nexus extends View {
           [n.name, await call(this.conn, "GET", `/v1/nodes/${encodeURIComponent(n.name)}/health`)
             .then((data) => ({ data, error: null }), (e) => ({ data: null, error: e instanceof Error ? e.message : String(e) }))])));
         page.data = { nodes, release, health };
+        await this.loadAdmission(cx);
       }
       page.error = null;
     } catch (e) {
       page.error = e instanceof Error ? e.message : String(e);
+      if (tab === "cluster") {
+        this.admissionRequest++;
+        page.admission = { data: null, error: `Placement unknown — cluster refresh failed: ${page.error}` };
+      }
     }
     cx.notify();
   }
@@ -386,6 +393,26 @@ export default class Nexus extends View {
     this.usagePeriod = period;
     this.pages.usage = { data: null, error: null };
     cx.spawn(async (cx) => this.loadPage(cx, "usage"));
+  }
+
+  /** Never keep a previous green admission after a failed read or a project change. */
+  async loadAdmission(cx, project = this.admissionProject ?? this.projects[0]?.id ?? null) {
+    const page = this.pages.cluster;
+    if (page?.data == null || this.conn === null) return;
+    const request = ++this.admissionRequest;
+    this.admissionProject = project;
+    page.admission = { data: null, error: project === null ? "Add a project to check placement." : null };
+    cx.notify();
+    if (project === null) return;
+    try {
+      const data = await call(this.conn, "GET", `/v1/placement/${encodeURIComponent(project)}`);
+      if (request === this.admissionRequest) page.admission = { data, error: null };
+    } catch (e) {
+      if (request === this.admissionRequest) page.admission = { data: null, error: e.status === 404
+        ? "Placement report unavailable. Update the Nexus control plane, or select an existing project."
+        : `Placement could not be read: ${e instanceof Error ? e.message : String(e)}` };
+    }
+    cx.notify();
   }
 
   /** Reading the changes wakes a paused pylon, so they load only on a press. */

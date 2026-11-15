@@ -23,6 +23,16 @@ Open it as a floating window with `herdr-app do mod.open '{"name":"nexus"}'`, or
 
 Check a change with `herdr-app check mods/nexus`. `npm test` at the repo root runs the model, stream and transport regression tests.
 
+## Placement on the Cluster page
+
+Pick a project above the node cards to check **auto placement of its default-sized pylon**. Each card shows the control plane's decision and refusal, not a decision inferred from the host's memory meter. A pinned project still names its default node: the preview does not change that policy or start anything.
+
+The report includes the memory ceiling, host memory available, running pylons' untouched reservations, pending boots, reclaimable holds and the spare placement keeps. It uses the scheduler's sampled health, which can differ from the card's live meter. Without a fresh sample, it explicitly says placement uses reservations alone. Reservations are labelled as such, and a default-size refusal gets the blocked tone even when the reservations look roomy.
+
+This requires Nexus's `GET /v1/placement/<project>` endpoint and deployer access, just like node health. Older control planes and failed reads show **Placement unknown**, never an estimated admission. Reports refresh with the Cluster page, every minute or on Refresh placement, and when the selected project changes. They are timestamped snapshots, not reserved room.
+
+On that Nexus version, memory refusals include the nearest eligible node's shortfall. Pipeline items and review waits show it in their server-provided reason, for the actual requested pylon size rather than the project preview's size. Those reasons describe the last start attempt, not a live reservation.
+
 ## The same mod on every machine
 
 Use the same checkout's `main` branch on both machines. Update with `git pull --ff-only` in this repo, then close and reopen the Nexus panel to ensure it loads the new code and configuration (newer Herdr versions also reload mod edits automatically). Keep `~/.config/nexus/cli.json` local to each machine; it is not part of this repo.
