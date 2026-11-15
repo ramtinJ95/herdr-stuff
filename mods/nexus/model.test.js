@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { arrivalKey, arrivals, askBody, attachedThreads, attentionOf, byProject, changesThreads, clusterNode, inFlight, itemGroups, landOffer, machineName, machineVia, openItems, needsYou, openQuestions, pick, pylonMachine, showSteps, strayMachines, unstarted, workerTerminal, presenceDue } from "./model.js";
+import { arrivalKey, arrivals, askBody, attachedThreads, attentionOf, byProject, changesThreads, clusterNode, inFlight, itemGroups, landOffer, machineName, machineVia, openItems, needsYou, openQuestions, pick, pylonMachine, reviewStarts, showSteps, strayMachines, stuckLines, unstarted, workerTerminal, presenceDue } from "./model.js";
 
 const row = (id, over = {}) => ({
   id, title: id, project: "p", status: "active", attention: null, working: false, createdAt: 1,
@@ -16,6 +16,14 @@ test("needs you ranks by attention, then by latest activity", () => {
     row("archived", { attention: "failed", status: "archived" }),
   ];
   assert.deepEqual(needsYou(rows).map((r) => r.id), ["failed", "reply-new", "reply-old"]);
+});
+
+test("a turn that died and a boot that is held need you, in the control plane's order, and notify", () => {
+  const rows = [row("reply", { attention: "reply" }), row("held", { attention: "boot-held" }), row("limited", { attention: "limited" }), row("parked", { attention: "parked" }), row("died", { attention: "died" }), row("decision", { attention: "decision" })];
+  assert.deepEqual(needsYou(rows).map((r) => r.id), ["decision", "died", "parked", "limited", "held", "reply"]);
+  assert.deepEqual(inFlight(rows), []);
+  const before = attentionOf([row("died", { attention: "working" }), row("held")]);
+  assert.deepEqual(arrivals(before, rows.filter((r) => r.id === "died" || r.id === "held")).map((r) => r.id), ["held", "died"]);
 });
 
 test("in flight puts each open thread not needing the person in its first matching group", () => {
@@ -81,6 +89,46 @@ test("Land offers the holds question when one is open, else a press that waives 
   assert.equal(landOffer(null).kind, "none");
   assert.match(landOffer(rv({}), { head: "h2" }).why, /moved to h2/);
   assert.equal(landOffer(rv({}), { head: "h1" }).kind, "press");
+});
+
+test("an approved review lands by a press though the control plane counts it ended; one that ended otherwise does not", () => {
+  const rv = (over) => ({ head: "h1", ended: true, question: null, phase: { kind: "approved" }, press: { kind: "lands", waives: [], quotes: false }, ...over });
+  assert.deepEqual(landOffer(rv({})), { kind: "press", head: "h1", body: { head: "h1" }, waives: [] });
+  assert.deepEqual(landOffer(rv({ phase: { kind: "landed" } })), { kind: "none", why: "The review ended landed" });
+  assert.deepEqual(landOffer(rv({ phase: { kind: "cancelled" } })), { kind: "none", why: "The review ended cancelled" });
+  assert.deepEqual(landOffer(rv({ ended: false, phase: { kind: "reviewing" } })), { kind: "none", why: "It lands once its review approves it" });
+  assert.match(landOffer(rv({ press: { kind: "stuck", holds: [{ text: "A migration." }] } })).why, /Held past any press: A migration\./);
+});
+
+test("an ended review starts again for its own pull request, and one of another says which waiting review it gives up", () => {
+  const rv = (over) => ({ id: "rv-1", pr: 7, ended: true, phase: { kind: "approved" }, ...over });
+  const prs = (...list) => list.map(([number, state]) => ({ number, state }));
+  assert.deepEqual(reviewStarts(rv({}), prs([9, "open"], [7, "open"])), [{ pr: 7, again: true, gives: null }, { pr: 9, again: false, gives: 7 }]);
+  assert.deepEqual(reviewStarts(rv({ phase: { kind: "needs-person", reasons: [] } }), prs([9, "open"], [7, "open"])).map((s) => s.gives), [null, 7]);
+  // Nexus refuses the start only while the waiting review's own pull request is open, and only for one that waits.
+  assert.deepEqual(reviewStarts(rv({}), prs([7, "merged"], [9, "open"])), [{ pr: 9, again: false, gives: null }]);
+  assert.deepEqual(reviewStarts(rv({ phase: { kind: "cancelled" } }), prs([7, "open"], [9, "open"])).map((s) => s.gives), [null, null]);
+  assert.deepEqual(reviewStarts(rv({}), prs([7, "closed"])), []);
+  assert.deepEqual(reviewStarts(rv({ ended: false, phase: { kind: "reviewing" } }), prs([7, "open"], [9, "open"])), []);
+  assert.deepEqual(reviewStarts(null, prs([7, "open"])), []);
+});
+
+test("a held boot and a dead turn say why the thread stands still, as nexus show words them", () => {
+  const now = 10 * 60_000;
+  const d = (over) => ({ thread: {}, pylon: {}, said: {}, resume: null, ...over });
+  assert.deepEqual(stuckLines(d({}), now), []);
+  assert.deepEqual(stuckLines(d({ pylon: { held: { since: now - 120_000 } }, said: { held: "It waits for the ChatGPT login." } }), now), ["Held 2m ago. It waits for the ChatGPT login."]);
+  assert.deepEqual(stuckLines(d({ pylon: { held: { since: now - 120_000 } } }), now), []);
+  const died = { thread: { turnDied: { at: now - 300_000, reason: "the API answered 529" } } };
+  assert.deepEqual(stuckLines(d(died), now), ["Turn died 5m ago: the API answered 529"]);
+  // A resume of an earlier death says nothing about this one.
+  assert.deepEqual(stuckLines(d({ ...died, resume: { turn: now - 600_000, state: "resumed", count: 1 } }), now), ["Turn died 5m ago: the API answered 529"]);
+  const resume = (over) => stuckLines(d({ ...died, resume: { turn: now - 300_000, count: 2, ...over } }), now)[0];
+  assert.equal(resume({ state: "waiting", due: now + 90_000 }), "Turn died 5m ago: the API answered 529; Nexus resumes it in 2m, 2 in a row");
+  assert.equal(resume({ state: "waiting", due: now - 1 }), "Turn died 5m ago: the API answered 529; Nexus resumes it now, 2 in a row");
+  assert.equal(resume({ state: "answered" }), "Turn died 5m ago: the API answered 529; you wrote to it since, so Nexus waits for the turn your message starts");
+  assert.equal(resume({ state: "resumed" }), "Turn died 5m ago: the API answered 529; Nexus resumed it, 2 in a row");
+  assert.equal(resume({ state: "person", why: "It died 3 times in a row." }), "Turn died, and Nexus does not resume it: It died 3 times in a row. Write to it to resume it.");
 });
 
 test("items group by phase in pipeline order, finished ones last; only an unstarted one approves or cancels", () => {

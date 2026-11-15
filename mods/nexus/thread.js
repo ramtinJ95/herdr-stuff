@@ -1,7 +1,7 @@
 // One thread: what it waits on you for, its review, its conversation as it streams, its changes, and the composer.
 import { div } from "gpui-kit";
 import { v_flex, h_flex, Textarea, TextView } from "gpui-base";
-import { ago, attentionLabel, landOffer, openQuestions } from "./model.js";
+import { ago, attentionLabel, landOffer, openQuestions, reviewStarts, stuckLines } from "./model.js";
 import { blocks, queued } from "./transcript.js";
 
 /** The newest blocks shown at first; Show earlier adds this many more. */
@@ -50,6 +50,7 @@ export function threadView(app, ui, now) {
       .child(div().text_size(12).text_color(t.muted).child([attentionLabel[d.attention] ?? "Nothing waits on you", th.project, th.status, id].join(" · "))),
     line(`${worker} · pylon ${d.pylon.actualState} on ${d.pylon.node}, asked to be ${d.desired}`),
     ...d.pylon.failed ? [line(`Failed: ${d.pylon.failed.message ?? JSON.stringify(d.pylon.failed)}`, t.blocked)] : [],
+    ...stuckLines(d, now).map((text) => line(text, t.blocked)),
     div().pt(8).child(actions),
   ];
 
@@ -122,8 +123,18 @@ function reviewSection(app, ui, d) {
   const land = offer.kind !== "press" ? null : app.confirm === key
     ? button("land", `Land #${rv.pr}: press again${offer.waives.length > 0 ? " to waive" : ""}`, (cx) => app.land(cx, d.thread.id, offer.body), { primary: true })
     : button("land", `Land #${rv.pr}`, (cx) => app.ask(cx, key), { primary: true });
-  const restart = rv.ended && openPr !== undefined && d.thread.status === "active"
-    ? button("review", "Review again", (cx) => app.act(cx, "Starting a review", () => app.post(`/v1/threads/${d.thread.id}/review`, { pr: openPr.number }))) : null;
+  // A review of another open pull request takes this one's place, so one that waits on the person takes a second press.
+  const starts = d.thread.status === "active" ? reviewStarts(rv, d.pullRequests) : [];
+  const start = (pr, replace) => (cx) => app.act(cx, "Starting a review", () => app.post(`/v1/threads/${d.thread.id}/review`, replace ? { pr, replace: true } : { pr }));
+  const restarts = starts.map((s) => {
+    const giveUp = `review-replace:${rv.id}:${s.pr}`;
+    if (s.again) return button("review", "Review again", start(s.pr, false));
+    if (s.gives === null) return button(`review-${s.pr}`, `Review #${s.pr}`, start(s.pr, false));
+    return app.confirm === giveUp
+      ? button(`review-${s.pr}`, `Review #${s.pr}: press again to give up #${s.gives}'s review`, start(s.pr, true), { danger: true })
+      : button(`review-${s.pr}`, `Review #${s.pr}`, (cx) => app.ask(cx, giveUp));
+  });
+  const givingUp = starts.find((s) => s.gives !== null && app.confirm === `review-replace:${rv.id}:${s.pr}`);
   return [heading("Review"), card("review-card")
     .children(lines.map((text, i) => div().id(`rv-${i}`).pt(i === 0 ? 0 : 3).text_size(12).text_color(i === 0 ? t.foreground : t.muted).child(text)))
     .children(all.length > 1 ? [div().id("rv-more").pt(4).text_size(11.5).text_color(t.accent).cursor_pointer()
@@ -131,9 +142,10 @@ function reviewSection(app, ui, d) {
       .child(expanded ? "Fewer details" : `${all.length - 1} more lines`)] : [])
     .children(rv.phase.kind === "needs-person" ? rv.phase.reasons.map((r, i) => div().id(`rv-why-${i}`).pt(3).text_size(12).text_color(t.blocked).child(`• ${r}`)) : [])
     .children(offer.kind === "press" && offer.waives.length > 0 && app.confirm === key ? [line(`Landing waives, at ${rv.head.slice(0, 12)}: ${offer.waives.join(" ")}`, t.blocked)] : [])
-    .children(offer.kind === "none" && (!rv.ended || rv.phase.kind === "needs-person") ? [line(offer.why, t.dim)] : offer.kind === "question" ? [line("Answer the question about its holds above to land it.", t.dim)] : [])
+    .children(givingUp === undefined ? [] : [line(`A thread has one review. Starting #${givingUp.pr}'s gives up review ${rv.id} of #${givingUp.gives}, which waits on you. Land #${givingUp.gives} first to keep what it approved.`, t.blocked)])
+    .children(offer.kind === "none" && (!rv.ended || rv.phase.kind === "needs-person" || rv.phase.kind === "approved") ? [line(offer.why, t.dim)] : offer.kind === "question" ? [line("Answer the question about its holds above to land it.", t.dim)] : [])
     .child(h_flex().pt(8).gap(6).flex_wrap()
-      .children([land, restart].filter((b) => b !== null))
+      .children([land, ...restarts].filter((b) => b !== null))
       .children(rv.ended ? [] : [button("review-cancel", "Cancel review", (cx) => app.act(cx, "Cancelling the review", () => app.post(`/v1/threads/${d.thread.id}/review/cancel`)), { danger: true })]))];
 }
 

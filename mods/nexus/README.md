@@ -2,11 +2,12 @@
 
 A [Herdr app](https://herdr.dev) mod with much of the dashboard beside your terminals:
 
-- **Thread lists:** what waits on you, the work in flight, and every open thread.
+- **Thread lists:** what waits on you, the work in flight, and every open thread. A turn that died and a pylon whose boot is held wait on you too, and notify like the rest.
 - **Thread view:**
   - its conversation, streamed as it happens;
   - its open questions, answered in place;
-  - its review, with Land, Review again and Cancel;
+  - why it stands still, in the control plane's words: a boot it holds, or a turn that died and whether Nexus resumes it;
+  - its review, with Land, Review again, Cancel, and a review of each other open pull request;
   - its pull requests and changes;
   - messaging, steering, Stop, Retry, Archive, marking seen, and Attach, which shows the pylon's terminals in the app, with Detach to take them out again.
 - **Other pages:** pipeline items with Approve and Cancel, the cluster's release and nodes, and token usage.
@@ -70,6 +71,7 @@ This is application-level proxy use, not a bridge between tailnets. Closing the 
 - **Seen:** a shown reply is marked seen with its own `lastReplyAt`, as the dashboard does. This happens only while the window is active and the panel is on screen: the window, or a docked copy in the shown tab.
 - **Changes:** reading a thread's changes wakes a paused pylon, so they load only when you press Load changes.
 - **Confirmations:** Land, Archive and Cancel take a second press within 6 seconds. A Land that waives holds names them first.
+- **Reviews:** an approved review keeps its Land button, though the control plane counts it ended. A thread has one review, so **Review #N** for another open pull request takes its place. When that gives up a review that waits on you while its own pull request is open, the button takes a second press, names the review given up, and sends `replace`, which Nexus 0.96.0 and later require.
 - **Commands:** `nexus.attach` and `nexus.archive` press the shown thread's Attach and Archive, for a key in `keys.json` or `herdr-app do nexus.archive`. Archive still takes a second command within 6 seconds. `nexus.detach` detaches the thread whose space the app shows, else the panel's shown thread, else the only one attached. A command reaches the panel only while a copy of it is on screen.
 - **Notifications:** they post only while a copy of the panel runs.
 
