@@ -14,7 +14,7 @@ export function kit(t) {
   const chip = (id, text, on, action) => h_flex().id(id).min_h(26).px(10).py(3).items_center().rounded(13).cursor_pointer()
     .border_1().border_color(on ? t.accent : t.input).bg(on ? t.selected : t.surface)
     .text_size(12).text_color(on ? t.foreground : t.muted).on_click((_e, cx) => { action(cx); cx.notify(); }).child(text);
-  const tone = (attention) => ({ failed: t.blocked, decision: t.blocked, parked: t.blocked, limited: t.ansi3, reply: t.done, working: t.working, waiting: t.accent })[attention] ?? t.idle;
+  const tone = (attention) => ({ failed: t.blocked, decision: t.blocked, died: t.blocked, parked: t.blocked, limited: t.ansi3, "boot-held": t.blocked, reply: t.done, working: t.working, waiting: t.accent })[attention] ?? t.idle;
   const dot = (color) => div().size(8).rounded(4).flex_none().bg(color);
   const heading = (text) => div().mt(18).mb(4).pb(5).border_b_1().border_color(t.border)
     .text_size(13).font_bold().text_color(t.foreground).child(text.toUpperCase());

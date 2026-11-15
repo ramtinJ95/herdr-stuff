@@ -4,13 +4,15 @@
 // so the panel groups by it rather than re-deriving the dashboard's server-side cards.
 
 /** Attention that waits on the person, most urgent first. */
-export const needRank = { failed: 0, decision: 1, parked: 2, limited: 3, reply: 4 };
+export const needRank = { failed: 0, decision: 1, died: 2, parked: 3, limited: 4, "boot-held": 5, reply: 6 };
 
 export const attentionLabel = {
   failed: "Failed",
   decision: "Decision",
+  died: "Turn died",
   parked: "Parked",
   limited: "Usage limit",
+  "boot-held": "Pylon held",
   reply: "New reply",
   working: "Working",
   waiting: "Waiting",
@@ -124,11 +126,46 @@ export function landOffer(rv, pr = null) {
   if (rv === null || rv === undefined) return { kind: "none", why: "No review" };
   if (rv.question !== null) return { kind: "question", id: rv.question.id, head: rv.question.head, waives: rv.question.holds.map((h) => h.text) };
   if (pr !== null && pr.head && pr.head !== rv.head) return { kind: "none", why: `The pull request moved to ${pr.head.slice(0, 12)} after the review's ${rv.head.slice(0, 12)}, so that commit is not offered for landing. Review it again.` };
-  if (rv.ended && rv.phase.kind !== "needs-person") return { kind: "none", why: `The review ended ${rv.phase.kind}` };
-  if (rv.phase.kind !== "approved" && rv.phase.kind !== "needs-person") return { kind: "none", why: "It lands once its review approves it" };
+  // The control plane counts a review that stopped at approval as ended, and it is the one a press lands.
+  if (rv.phase.kind !== "approved" && rv.phase.kind !== "needs-person") return { kind: "none", why: rv.ended ? `The review ended ${rv.phase.kind}` : "It lands once its review approves it" };
   if (rv.press.kind === "stuck") return { kind: "none", why: `Held past any press: ${rv.press.holds.map((h) => h.text).join(" ")}` };
   const waives = rv.press.waives.map((h) => h.text);
   return { kind: "press", head: rv.head, body: waives.length === 0 ? { head: rv.head } : { head: rv.head, waive: waives }, waives };
+}
+
+/**
+ * The reviews a thread whose review ended can start: one per open pull request, the review's own first. One of another
+ * pull request takes the review's place as the thread's one review. While the review waits on the person and its own
+ * pull request is still open, Nexus 0.96.0 refuses that start unless the body says `replace`, so `gives` names the
+ * pull request whose review a start gives up, and is null where a start gives none up.
+ */
+export function reviewStarts(rv, pullRequests) {
+  if (!rv?.ended) return [];
+  const open = pullRequests.filter((pr) => pr.state === "open");
+  const waits = (rv.phase.kind === "approved" || rv.phase.kind === "needs-person") && open.some((pr) => pr.number === rv.pr);
+  return open.map((pr) => ({ pr: pr.number, again: pr.number === rv.pr, gives: pr.number !== rv.pr && waits ? rv.pr : null }))
+    .sort((a, b) => Number(b.again) - Number(a.again));
+}
+
+/**
+ * Why a thread stands still where its attention alone does not say: a boot or wake the planner holds, in the control
+ * plane's own sentence, and a turn that died, with what Nexus does about it, as `nexus show` words both.
+ */
+export function stuckLines(d, now) {
+  const lines = [];
+  const held = d.pylon?.held;
+  if (held && d.said?.held) lines.push(`Held ${ago(held.since, now)}. ${d.said.held}`);
+  const died = d.thread?.turnDied;
+  if (died) {
+    const of = d.resume != null && d.resume.turn >= died.at ? d.resume : null;
+    if (of?.state === "person") lines.push(`Turn died, and Nexus does not resume it: ${of.why} Write to it to resume it.`);
+    else {
+      const then = of === null ? "" : of.state === "waiting" ? `; Nexus resumes it ${now < of.due ? `in ${Math.ceil((of.due - now) / 60_000)}m` : "now"}, ${of.count} in a row`
+        : of.state === "answered" ? "; you wrote to it since, so Nexus waits for the turn your message starts" : `; Nexus resumed it, ${of.count} in a row`;
+      lines.push(`Turn died ${ago(died.at, now)}: ${died.reason}${then}`);
+    }
+  }
+  return lines;
 }
 
 /** The phases of an item still to land, in pipeline order. */
