@@ -10,7 +10,8 @@ const source = (await readFile(new URL("./main.js", import.meta.url), "utf8"))
 function view(call) {
   const Nexus = runInNewContext(`${source}\nNexus`, { View: class {}, call });
   return Object.assign(new Nexus(), { conn: {}, projects: [{ id: "first" }, { id: "second" }],
-    pages: { cluster: { data: {}, error: null } }, admissionProject: null, admissionRequest: 0 });
+    pages: { cluster: { data: {}, error: null } }, admissionProject: null, admissionRequest: 0,
+    openNodes: new Set(), metrics: new Map(), metricSlots: new Map(), graphRange: "1h" });
 }
 const cx = { notify() {} };
 
@@ -47,7 +48,7 @@ test("node refresh failure invalidates even an admission request already in flig
   late.resolve({ project: "first", nodes: [{ admitted: true }] });
   await reading;
   assert.equal(app.pages.cluster.admission.data, null);
-  assert.match(app.pages.cluster.admission.error, /cluster refresh failed/);
+  assert.match(app.pages.cluster.admission.error, /The cluster refresh failed/);
 });
 
 test("cluster asks for the scheduler's report after host reads, and an empty project list never guesses", async () => {

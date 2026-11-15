@@ -10,7 +10,7 @@ A [Herdr app](https://herdr.dev) mod with much of the dashboard beside your term
   - its review, with Land, Review again, Cancel, and a review of each other open pull request;
   - its pull requests and changes;
   - messaging, steering, Stop, Retry, Archive, marking seen, and Attach, which shows the pylon's terminals in the app, with Detach to take them out again.
-- **Other pages:** pipeline items with Approve and Cancel, the cluster's release and nodes, and token usage.
+- **Other pages:** pipeline items with Approve and Cancel, the cluster's release and nodes with the dashboard's graphs, and token usage.
 
 It uses the control plane that `nexus connect`, the [Nexus](https://github.com/ramtinJ95/nexus) CLI, saved in `~/.config/nexus/cli.json`, so connect the CLI first. Both direct connections and a saved SOCKS5 proxy are supported.
 
@@ -24,13 +24,29 @@ Open it as a floating window with `herdr-app do mod.open '{"name":"nexus"}'`, or
 
 Check a change with `herdr-app check mods/nexus`. `npm test` at the repo root runs the model, stream and transport regression tests.
 
-## Placement on the Cluster page
+## The Cluster page
 
-Pick a project above the node cards to check **auto placement of its default-sized pylon**. Each card shows the control plane's decision and refusal, not a decision inferred from the host's memory meter. A pinned project still names its default node: the preview does not change that policy or start anything.
+The page reads top to bottom as the release, placement, then the nodes:
+
+- **Release** is one line, with any role that is not healthy under it; Roles lists them all.
+- **Placement** answers one question: would a new pylon of the picked project fit, node by node? Below.
+- **Nodes** are cards of three lines: the node and when it was seen, its load, memory and fullest disk as small meters, and how many pylons are up, paused, crashed or orphaned. A card's border turns to the blocked tone for a node that is offline or overcommitted, not for a project's pylon that does not fit.
+
+Click a card's name to open its details:
+
+- the scheduler's whole placement report on the node for the picked project, below;
+- each meter in full, every disk on its own row, the reservations, what the pylons hold, the hottest sensors and the busiest pylon;
+- the dashboard's graphs of the node, from `GET /v1/nodes/<node>/metrics` for the picked range, 15 minutes to 30 days: load per CPU, load against CPUs, memory, swap, disk free, temperatures, and each pylon's CPU and memory. A legend entry reads the line's latest point, and a click hides or shows the line. A pylon keeps its colour across the two pylon charts and while others start and stop. Where readings stop for more than a couple of minutes the line breaks, and over longer ranges a band shows each bucket's minimum and maximum around its average.
+
+The graphs read again with the page, every minute, and when the range changes; the range is kept for the next time. Where more points fall in a plot's width than it can show, as over 30 days, each column keeps its highest and lowest, so a spike still shows. They have no crosshair, unlike the dashboard's. A control plane without the metrics route says the graphs need a newer one.
+
+### Placement
+
+Pick a project after **New pylon for** to check **auto placement of its default-sized pylon**. A line gives that size and when the report was taken, and each node has a row: it fits, or it does not, and the nearest node says how much memory it lacks. That is the control plane's decision, not one inferred from the host's memory meter; a node card's details hold the reasons. A pinned project still names its default node: the preview does not change that policy or start anything.
 
 The report includes the memory ceiling, host memory available, running pylons' untouched reservations, pending boots, reclaimable holds and the spare placement keeps. It uses the scheduler's sampled health, which can differ from the card's live meter. Without a fresh sample, it explicitly says placement uses reservations alone. Reservations are labelled as such, and a default-size refusal gets the blocked tone even when the reservations look roomy.
 
-This requires Nexus's `GET /v1/placement/<project>` endpoint and deployer access, just like node health. Older control planes and failed reads show **Placement unknown**, never an estimated admission. Reports refresh with the Cluster page, every minute or on Refresh placement, and when the selected project changes. They are timestamped snapshots, not reserved room.
+This requires Nexus's `GET /v1/placement/<project>` endpoint and deployer access, just like node health. Older control planes and failed reads show **Placement unknown**, never an estimated admission. Reports refresh with the Cluster page, every minute or on Refresh, and when the selected project changes. They are timestamped snapshots, not reserved room.
 
 On that Nexus version, memory refusals include the nearest eligible node's shortfall. Pipeline items and review waits show it in their server-provided reason, for the actual requested pylon size rather than the project preview's size. Those reasons describe the last start attempt, not a live reservation.
 
