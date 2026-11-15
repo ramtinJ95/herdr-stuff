@@ -153,7 +153,7 @@ export function gib(n) {
 }
 
 /** A node card's words and measured meters. Reservations never stand in for an unread host reading. */
-export function clusterNode(n, health, now) {
+export function clusterNode(n, health, now, admission = null, resources = null) {
   const h = health?.data ?? null;
   const c = n.capacity;
   const p = n.pylons;
@@ -172,7 +172,7 @@ export function clusterNode(n, health, now) {
     ...disks.length === 0 ? [meter("Disk unknown")] : disks.map((d) => meter(`Disk ${gib(d.totalGiB - d.freeGiB)} used of ${gib(d.totalGiB)}${disks.length > 1 && d.paths?.length ? ` · ${d.paths.join(", ")}` : ""}`, d.totalGiB - d.freeGiB, d.totalGiB)),
   ];
   // Before probes counted committed disk, committed memory was always zero, not a known reservation.
-  const committed = c == null ? "Committed capacity unknown" : `Committed: ${c.committedCpus ?? "unknown"} of ${c.cpus ?? "unknown"} CPUs · ${c.committedDiskGiB === undefined || c.committedMemoryGiB === undefined ? "unknown" : gib(c.committedMemoryGiB).replace(" GiB", "")} of ${c.memoryGiB === undefined ? "unknown GiB" : gib(c.memoryGiB)} memory · ${c.committedDiskGiB === undefined ? "unknown" : gib(c.committedDiskGiB)} disk`;
+  const committed = c == null ? "Reservations unknown" : `Reservations (not free capacity): ${c.committedCpus ?? "unknown"} of ${c.cpus ?? "unknown"} CPUs · ${c.committedDiskGiB === undefined || c.committedMemoryGiB === undefined ? "unknown" : gib(c.committedMemoryGiB).replace(" GiB", "")} of ${c.memoryGiB === undefined ? "unknown GiB" : gib(c.memoryGiB)} memory · ${c.committedDiskGiB === undefined ? "unknown" : gib(c.committedDiskGiB)} disk`;
   const tallies = p == null ? ["unknown (no observation yet)"] : [
     ...p.up.pylons === 0 ? [] : [`${p.up.pylons} up holding ${p.up.cpus} CPUs and ${gib(p.up.memoryGiB)}`],
     ...p.paused.pylons === 0 ? [] : [`${p.paused.pylons} paused needing ${gib(p.paused.memoryGiB)} to wake`],
@@ -185,11 +185,30 @@ export function clusterNode(n, health, now) {
   return {
     status: `${n.state} · ${n.observedAt == null ? "never observed" : `seen ${ago(Date.parse(n.observedAt), now)}`}`,
     meters, committed: `${committed}${n.overcommitted ? " · overcommitted" : ""}`,
+    committedTone: n.overcommitted || admission?.admitted === false ? "blocked" : "muted",
+    admission: admissionLines(admission, resources, now),
     pylons: `Pylons: ${tallies.length === 0 ? "none" : tallies.join(", ")}`,
     pylonsTone: p?.crashed.pylons || p?.orphaned.length ? "blocked" : "muted",
     healthError: health?.error ? `Health could not be read: ${health.error}` : h === null ? "Health unknown" : null,
     detail: [...temps, ...busy].join(" · "),
   };
+}
+
+/** Format the control plane's decision; never reconstruct its admission rule from host readings. */
+export function admissionLines(admission, resources, now) {
+  if (admission == null || resources == null) return [{ text: "Placement unknown — reservations do not show room for a new pylon.", tone: "blocked" }];
+  const lines = [{ text: `Auto placement: ${admission.admitted ? "can take" : "cannot take"} a ${gib(resources.memoryGiB)} pylon (${resources.cpus} CPUs, ${gib(resources.diskGiB)} disk).`, tone: admission.admitted ? "done" : "blocked" }];
+  if (admission.reason) lines.push({ text: admission.reason, tone: "blocked" });
+  const m = admission.memory;
+  if (m !== null) {
+    // Round the ceiling down, so the printed size never promises more than the scheduler permits.
+    lines.push({ text: `Memory ceiling for a new pylon: ${(Math.floor(Math.max(0, m.maxMemoryGiB) * 10) / 10).toFixed(1)} GiB (other requirements still apply).`, tone: "muted" });
+    lines.push({ text: m.availableGiB === null
+      ? "No fresh host-memory sample — placement uses reservations only."
+      : `Host free ${gib(m.availableGiB)} · reserved but untouched ${gib(m.untouchedGiB)} · spare ${gib(m.headroomGiB)} · sampled ${ago(m.sampledAt, now)}`, tone: m.availableGiB === null ? "blocked" : "muted" });
+    if (m.pendingGiB || m.reclaimableGiB) lines.push({ text: `Pending boots ${gib(m.pendingGiB)} · reclaimable holds ${gib(m.reclaimableGiB)}`, tone: "muted" });
+  }
+  return lines;
 }
 
 /** Like the CLI's tokenCount: 1.2k, 34M, 8.9B. */

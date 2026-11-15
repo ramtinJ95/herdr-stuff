@@ -82,7 +82,7 @@ const bar = (ui, meter) => div().mt(3).h(6).w_full().rounded(3).bg(ui.t.border)
     .w(/** @type {`${number}%`} */ (`${meter.percent.toFixed(1)}%`))]);
 
 export function clusterPage(app, ui, now) {
-  const { t, heading, line, card } = ui;
+  const { t, heading, line, card, chip, button } = ui;
   const page = app.pages.cluster;
   const wait = pending(ui, page);
   if (wait !== null) return wait;
@@ -93,17 +93,24 @@ export function clusterPage(app, ui, now) {
     for (const n of release.nodes ?? []) out.push(line(`${n.role} on ${n.node}: ${n.state} at ${n.commit?.slice(0, 12) ?? "nothing"}${n.reason ? ` (${n.reason})` : ""}`, n.state === "healthy" ? t.muted : t.blocked));
   }
   out.push(heading("Nodes"));
+  out.push(h_flex().flex_wrap().gap(6).children(app.projects.map((p) => chip(`placement-${p.id}`, p.id, app.admissionProject === p.id,
+    (cx) => cx.spawn(async (cx) => app.loadAdmission(cx, p.id)))))
+    .child(button("placement-refresh", "Refresh placement", (cx) => cx.spawn(async (cx) => app.loadAdmission(cx)), { disabled: app.admissionProject === null })));
+  const report = page.admission?.data ?? null;
+  out.push(line(page.admission?.error ?? (report === null ? "Reading placement…" : `Auto-placement snapshot ${ago(report.at, now)} · not a reservation${report.defaultNode === "auto" ? "" : ` · project's default is pinned to ${report.defaultNode}`}`), page.admission?.error ? t.blocked : t.dim));
+  if (report?.nearest) out.push(line(`Nearest node: ${report.nearest.node} needs ${(Math.ceil(report.nearest.missingGiB * 10) / 10).toFixed(1)} GiB more memory.`, t.blocked));
   for (const n of nodes) {
-    const node = clusterNode(n, health[n.name], now);
-    out.push(card(`node-${n.name}`, n.state === "online" ? t.border : t.blocked)
+    const node = clusterNode(n, health[n.name], now, report?.nodes.find((a) => a.node === n.name), report?.resources);
+    out.push(card(`node-${n.name}`, n.state === "online" && node.committedTone !== "blocked" ? t.border : t.blocked)
       .child(h_flex().gap(8).items_center()
         .child(div().size(8).rounded(4).bg(n.state === "online" ? t.done : t.blocked))
         .child(div().flex_1().text_size(13).font_semibold().text_color(t.foreground).child(n.name))
         .child(div().text_size(11.5).text_color(t.dim).child(node.status)))
       .children(node.healthError === null ? [] : [line(node.healthError, t.blocked)])
+      .children(node.admission.map((a) => line(a.text, t[a.tone])))
       .children(node.meters.map((meter, i) => v_flex().id(`meter-${n.name}-${i}`)
         .child(line(meter.text)).child(bar(ui, meter))))
-      .child(line(node.committed, n.overcommitted ? t.blocked : t.muted))
+      .child(line(node.committed, t[node.committedTone]))
       .child(line(node.pylons, t[node.pylonsTone]))
       .children(node.detail ? [line(node.detail, t.dim)] : []));
   }
