@@ -200,7 +200,7 @@ test("infra-testbench's words and meters measure host readings, not reservations
     assert.ok(Math.abs(m.percent - expected[i] * 100) < 1e-10);
     assert.equal(m.tone, "muted");
   });
-  assert.equal(card.committed, "Committed: 2 of 16 CPUs · 4.0 of 31.0 GiB memory · 50.0 GiB disk");
+  assert.equal(card.committed, "Reservations (not free capacity): 2 of 16 CPUs · 4.0 of 31.0 GiB memory · 50.0 GiB disk");
   assert.equal(card.pylons, "Pylons: 1 up holding 2 CPUs and 4.0 GiB");
 });
 
@@ -214,7 +214,7 @@ test("rj-firebat's zero commitments do not zero its measured load or memory", ()
   ]);
   const expected = [0.59 / 16, 3.9 / 23, 75.8 / 952];
   card.meters.forEach((m, i) => assert.ok(Math.abs(m.percent - expected[i] * 100) < 1e-10));
-  assert.equal(card.committed, "Committed: 0 of 16 CPUs · 0.0 of 23.0 GiB memory · 60.0 GiB disk");
+  assert.equal(card.committed, "Reservations (not free capacity): 0 of 16 CPUs · 0.0 of 23.0 GiB memory · 60.0 GiB disk");
 });
 
 test("null host load and memory say unknown and never draw commitments", () => {
@@ -260,7 +260,7 @@ test("never-observed nodes render unknown capacity and pylons without parsing a 
   const unobserved = { ...n, capacity: null, observedAt: null, pylons: null };
   const card = clusterNode(unobserved, undefined, nodeNow);
   assert.equal(card.status, "online · never observed");
-  assert.equal(card.committed, "Committed capacity unknown");
+  assert.equal(card.committed, "Reservations unknown");
   assert.equal(card.pylons, "Pylons: unknown (no observation yet)");
   assert.ok(card.meters.every((m) => m.percent === null));
   assert.equal(cardFor(unobserved, h).meters[0].percent, 10, "a live reading needs no capacity snapshot");
@@ -276,10 +276,10 @@ test("old probes without disks use the measured legacy disk; missing readings st
   delete n.capacity.committedCpus;
   delete n.capacity.committedDiskGiB;
   n.capacity.committedMemoryGiB = 0;
-  assert.equal(cardFor(n, h).committed, "Committed: unknown of 16 CPUs · unknown of 31.0 GiB memory · unknown disk");
+  assert.equal(cardFor(n, h).committed, "Reservations (not free capacity): unknown of 16 CPUs · unknown of 31.0 GiB memory · unknown disk");
   delete n.capacity.cpus;
   delete n.capacity.memoryGiB;
-  assert.equal(cardFor(n, h).committed, "Committed: unknown of unknown CPUs · unknown of unknown GiB memory · unknown disk");
+  assert.equal(cardFor(n, h).committed, "Reservations (not free capacity): unknown of unknown CPUs · unknown of unknown GiB memory · unknown disk");
 });
 
 test("every meter shares the 75/90 percent rule, saturates at full, and keeps real words", () => {
@@ -305,10 +305,47 @@ test("each measured filesystem has its own row, while reservations and wake need
   assert.equal(card.meters[2].text, "Disk 419 GiB used of 930 GiB · /pylons");
   assert.equal(card.meters[3].text, "Disk 90.0 GiB used of 100 GiB · /data, /cache");
   assert.equal(card.meters[3].tone, "blocked");
-  assert.equal(card.committed, "Committed: 2 of 16 CPUs · 4.0 of 31.0 GiB memory · 50.0 GiB disk · overcommitted");
+  assert.equal(card.committed, "Reservations (not free capacity): 2 of 16 CPUs · 4.0 of 31.0 GiB memory · 50.0 GiB disk · overcommitted");
   assert.equal(card.pylons, "Pylons: 1 up holding 2 CPUs and 4.0 GiB, 2 paused needing 8.0 GiB to wake, 1 crashed needing 4.0 GiB to retry, 1 orphaned (pylon-stray)");
   assert.equal(card.pylonsTone, "blocked");
   n.capacity.disks = [...h.disks];
   const unread = clusterNode(n, { data: null, error: "forbidden" }, nodeNow);
   assert.deepEqual(unread.meters.slice(2), card.meters.slice(2), "observed filesystems keep paths and meter semantics");
+});
+
+const defaultSize = { cpus: 2, memoryGiB: 4, diskGiB: 10 };
+const admissionFixture = () => ({ node: "infra-testbench", admitted: false,
+  reason: "has 6.3 GiB of memory free, less 2.6 GiB its pylons have yet to touch, and the pylon needs 4 GiB with 1 GiB to spare",
+  memory: { maxMemoryGiB: 2.7, availableGiB: 6.3, untouchedGiB: 2.6, pendingGiB: 0, reclaimableGiB: 0, headroomGiB: 1, sampledAt: nodeNow - 30_000 } });
+
+test("a roomy-looking card uses the server's refusal, not the live meter or commitments", () => {
+  const { n, h } = nodeFixture();
+  const a = admissionFixture();
+  const card = clusterNode(n, { data: h }, nodeNow, a, defaultSize);
+  assert.equal(card.committedTone, "blocked");
+  assert.match(card.admission[0].text, /cannot take a 4.0 GiB pylon/);
+  assert.equal(card.admission[0].tone, "blocked");
+  assert.equal(card.admission[1].text, a.reason);
+  assert.match(card.admission[2].text, /2.7 GiB/);
+  assert.match(card.admission[3].text, /Host free 6.3 GiB · reserved but untouched 2.6 GiB · spare 1.0 GiB/);
+  assert.equal(card.meters[1].text, "Memory 5.2 GiB used of 31.0 GiB", "health can have a different sample; it never decides admission");
+});
+
+test("admission distinguishes stale samples, pending boots, held room, offline nodes and unavailable reports", () => {
+  const { n, h } = nodeFixture();
+  const a = admissionFixture();
+  a.admitted = true;
+  a.reason = null;
+  a.memory = { ...a.memory, maxMemoryGiB: 5.67, availableGiB: null, untouchedGiB: null, sampledAt: null, pendingGiB: 4, reclaimableGiB: 8 };
+  const card = clusterNode(n, { data: h }, nodeNow, a, defaultSize);
+  assert.equal(card.committedTone, "muted");
+  assert.equal(card.admission[0].tone, "done");
+  assert.match(card.admission[1].text, /5.6 GiB/);
+  assert.match(card.admission[2].text, /No fresh host-memory sample/);
+  assert.match(card.admission[3].text, /Pending boots 4.0 GiB · reclaimable holds 8.0 GiB/);
+  assert.equal(clusterNode({ ...n, overcommitted: true }, { data: h }, nodeNow, a, defaultSize).committedTone, "blocked");
+  const offline = clusterNode({ ...n, state: "offline" }, undefined, nodeNow, { ...a, admitted: false, reason: "is offline", memory: null }, defaultSize);
+  assert.deepEqual(offline.admission.map((l) => l.tone), ["blocked", "blocked"]);
+  assert.match(cardFor(n, h).admission[0].text, /Placement unknown/);
+  assert.equal(cardFor(n, h).admission[0].tone, "blocked");
 });
