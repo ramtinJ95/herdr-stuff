@@ -22,7 +22,7 @@ Then merge `mods/cosy/keys.json` into `~/.config/herdr-app/keys.json` (Ctrl-f m 
 
 ## The art
 
-Every picture is cut from the wallpaper the layout is built around, by `art/make.sh <wallpaper>` (ImageMagick): the room out of focus behind everything, the street behind the glass, the shelf and the table, and one plank of the table top pulled out long for the beam (`wood.js` lays it from both ends, so it fits any width). The script expects that painting (1586x992); another one needs its crop boxes changed. The wallpaper is not in this repo, and its license is unknown to me: check it before publishing `art/`.
+Every picture is cut from the wallpaper the layout is built around, by `art/make.sh <wallpaper>` (ImageMagick): the room out of focus behind everything, the street behind the glass, the shelf and the table, and one plank of the table top pulled out long for the beam. `wood.js` lays it from both ends, sizing each piece to cover its measured half of the beam without distorting the grain; ultrawide windows crop the extra height instead of exposing a gap. Resizing and app zoom use the same sizing, with no monitor-specific width limit. The script expects that painting (1586x992); another one needs its crop boxes changed. The wallpaper is not in this repo, and its license is unknown to me: check it before publishing `art/`.
 
 The cups, notes, bulbs and icons in `icons/` are drawn for this layout. Instrument Serif (`fonts/`) is by The Instrument Serif Project Authors, under the SIL Open Font License (`fonts/LICENSE-InstrumentSerif.txt`).
 
