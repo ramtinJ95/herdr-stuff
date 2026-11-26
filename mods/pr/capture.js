@@ -47,7 +47,7 @@ const seen = [
   ["no-repo", "a git repository whose remote is not a GitHub host", otherHost, lookup],
   ["no-pr", "the default branch, which has no open pull request", onMain, lookup],
   ["no-pr", "a detached HEAD", detached, lookup],
-  ["no-pr", "PR_QUERY for a pull request number that does not exist", plain, prArgs(owner, name, 999999, false)],
+  ["no-pr", "PR_QUERY for a pull request number that does not exist", plain, prArgs({ host: "github.com", owner, name, number: 999999 })],
   ["offline", "HTTPS_PROXY pointing at a closed port", onMain, lookup, { HTTPS_PROXY: "http://127.0.0.1:9" }],
   ["no-auth", "an empty GH_CONFIG_DIR and no token in the environment", onMain, lookup, { GH_CONFIG_DIR: noConfig, GH_TOKEN: undefined, GITHUB_TOKEN: undefined }],
   ["no-auth", "a token GitHub rejects", plain, ["api", "graphql", "-f", "query=query { rateLimit { remaining } }"], { GH_TOKEN: "not-a-real-token" }],
@@ -69,7 +69,7 @@ const rejections = [
 ];
 
 const found = await run("gh", [...lookup, number, "-R", repo]);
-const pr = await run("gh", prArgs(owner, name, Number(number), false));
+const pr = await run("gh", prArgs({ host: "github.com", owner, name, number: Number(number) }));
 const nodes = JSON.parse(pr.stdout).data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.nodes;
 const ids = nodes.filter((n) => n.__typename === "CheckRun").slice(0, 2).map((n) => n.id);
 const steps = await run("gh", stepsArgs(ids));

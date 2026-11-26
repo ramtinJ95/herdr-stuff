@@ -3,7 +3,8 @@
 /** @typedef {import("./github.js").Failure} Failure */
 /** @typedef {"working" | "blocked" | "done" | "idle"} Tone */
 /** @typedef {{ pass: number, fail: number, pending: number, skipping: number, cancel: number }} Tally */
-/** @typedef {{ kind: "none" | "fail" | "pending" | "cancel" | "pass", basis: "required" | "all", counts: Tally, all: Tally, running: Check[], hidden: number }} Ci */
+/** @typedef {{ kind: "none" | "fail" | "pending" | "cancel" | "pass", basis: "required" | "all", counts: Tally, all: Tally }} Ci */
+/** @typedef {{ failure: Failure, streak: number }} Trouble  `streak` counts failures of one kind in a row, from 1. */
 /** @typedef {{ kind: "draft" | "conflicts" | "behind" | "review-required" | "changes-requested" | "checks-failing" | "checks-running" | "rules", label: string, tone: Tone }} Blocker */
 /** @typedef {{ kind: "ready", clean: boolean, note: string | null } | { kind: "blocked", blockers: Blocker[] } | { kind: "unknown" } | { kind: "merged" } | { kind: "closed" }} Merge */
 
@@ -27,12 +28,11 @@ function ciOf(snapshot) {
   const required = snapshot.checks.filter((c) => c.required);
   const basis = required.length > 0 ? "required" : "all";
   const counts = tally(basis === "required" ? required : snapshot.checks);
-  const running = snapshot.checks.filter((c) => c.bucket === "pending").sort(oldestFirst);
-  return { kind: kindOf(counts), basis, counts, all: tally(snapshot.checks), running, hidden: snapshot.hidden };
+  return { kind: kindOf(counts), basis, counts, all: tally(snapshot.checks) };
 }
 
-/** How GitHub's mergeStateStatus reads before the blockers are looked at. */
-const MERGE_STATES = { CLEAN: "ready", HAS_HOOKS: "ready", UNSTABLE: "ready", BLOCKED: "blocked", BEHIND: "blocked", DIRTY: "blocked", DRAFT: "blocked", UNKNOWN: "unknown" };
+/** GitHub's mergeStateStatus values that mean it would merge. In any other, the blockers say why not. */
+const READY = ["CLEAN", "HAS_HOOKS", "UNSTABLE"];
 
 /** Every reason an open PR cannot merge, in the order shown. `rules` is what GitHub's BLOCKED means when nothing else explains it. */
 const BLOCKERS = [
@@ -50,13 +50,12 @@ const BLOCKERS = [
 function mergeOf(pr, ci) {
   if (pr.state === "MERGED") return { kind: "merged" };
   if (pr.state === "CLOSED") return { kind: "closed" };
-  const reading = MERGE_STATES[pr.mergeState];
-  if (reading === "ready") return { kind: "ready", clean: pr.mergeState !== "UNSTABLE", note: pr.mergeState === "UNSTABLE" ? GH_SUMMARY[kindOf(ci.all)] ?? null : null };
+  if (READY.includes(pr.mergeState)) return { kind: "ready", clean: pr.mergeState !== "UNSTABLE", note: pr.mergeState === "UNSTABLE" ? GH_SUMMARY[kindOf(ci.all)] ?? null : null };
   const blockers = BLOCKERS.reduce((found, b) => (b.holds(pr, ci, found) ? [...found, { kind: b.kind, label: b.label, tone: b.tone }] : found), []);
   return blockers.length > 0 ? { kind: "blocked", blockers } : { kind: "unknown" };
 }
 
-const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+export const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const checksWord = (ci, n) => plural(n, ci.basis === "required" ? "required check" : "check");
 
 /** The headline: the first row that holds, top to bottom. */
@@ -105,9 +104,7 @@ const FAILURE_LINES = {
 };
 
 /** @param {Failure} failure */
-export function describeFailure(failure) {
-  return { ...FAILURE_LINES[failure.kind], text: failure.text };
-}
+export const describeFailure = (failure) => FAILURE_LINES[failure.kind];
 
 /** The check rows in display order. Within a group, checks keep the snapshot's order: by workflow, then name, digits as numbers. */
 const GROUPS = [
@@ -123,21 +120,34 @@ export function groups(snapshot) {
   return GROUPS.map((g) => ({ ...g, checks: snapshot.checks.filter((c) => c.bucket === g.key) })).filter((g) => g.checks.length > 0);
 }
 
-const hasSteps = (c) => c.kind === "run" && c.app === "github-actions";
+/** Only a GitHub Actions job has steps GitHub keeps. */
+export const hasSteps = (c) => c.kind === "run" && c.app === "github-actions";
 
-/** The checks to ask steps for: the selected one, then Actions jobs in progress, oldest first, at most `max`. @returns {string[]} */
+/** Steps that will not change: the job has finished and so has every step read. */
+const stepsFinal = (c) => c.completedAt !== null && c.steps !== null && c.steps.every((s) => s.bucket !== "pending");
+
+/**
+ * The checks to ask steps for: the selected one, then Actions jobs in progress, oldest first, at most `max`.
+ * A check whose steps are final is left out. @returns {string[]}
+ */
 export function stepsWanted(snapshot, selectedId, max) {
-  const selected = snapshot.checks.filter((c) => c.id === selectedId && hasSteps(c));
+  const selected = snapshot.checks.filter((c) => c.id === selectedId && hasSteps(c) && !stepsFinal(c));
   const running = snapshot.checks.filter((c) => c.id !== selectedId && hasSteps(c) && c.state === "IN_PROGRESS").sort(oldestFirst);
   return [...selected, ...running].slice(0, max).map((c) => c.id);
 }
 
+/** `next`, a snapshot fresh from GitHub and so without steps, with the final steps `prev` held, so they are not asked for again. @returns {Snapshot} */
+export function keepSteps(next, prev) {
+  const final = new Map(prev.checks.filter(stepsFinal).map((c) => [c.id, c.steps]));
+  return final.size === 0 ? next : { ...next, checks: next.checks.map((c) => (c.steps === null && final.has(c.id) ? { ...c, steps: final.get(c.id) } : c)) };
+}
+
 /**
  * How long to wait before the next poll, per situation, in ms; null means "not until asked" (a key, the pane shown again).
+ * A pane that is not on screen does not poll at all: the view holds that, not this table.
  * An object is a backoff: `first`, doubled for each failure in a row, up to `max`.
  */
 export const POLL = {
-  hidden: null,
   merged: null,
   closed: null,
   running: 10_000,
@@ -152,23 +162,20 @@ export const POLL = {
   unknown: { first: 15_000, max: 300_000 },
 };
 
-function situation({ ciKind, prState, visible, error }) {
-  if (!visible) return "hidden";
-  if (error !== null) return error.kind;
-  if (prState !== "OPEN") return prState === "MERGED" ? "merged" : "closed";
-  return ciKind === "pending" ? "running" : ciKind === "none" ? "no-checks" : "settled";
+/** The wait after a poll that answered. @param {Ci["kind"]} ciKind @param {"OPEN" | "CLOSED" | "MERGED"} prState @returns {number | null} */
+export function nextPollDelay(ciKind, prState) {
+  if (prState !== "OPEN") return POLL[prState === "MERGED" ? "merged" : "closed"];
+  return POLL[ciKind === "pending" ? "running" : ciKind === "none" ? "no-checks" : "settled"];
 }
 
-/**
- * @param {{ ciKind: Ci["kind"] | null, prState: "OPEN" | "CLOSED" | "MERGED" | null, visible: boolean,
- *   error: { kind: import("./github.js").FailureKind, streak: number } | null }} state  `streak` counts failures in a row, from 1.
- * @returns {number | null}
- */
-export function nextPollDelay(state) {
-  const row = POLL[situation(state)];
-  if (row === null || typeof row === "number") return row;
-  return Math.min(row.first * 2 ** (state.error.streak - 1), row.max);
+/** The wait after a failure. @param {Trouble} trouble @returns {number | null} */
+export function failureDelay({ failure, streak }) {
+  const row = POLL[failure.kind];
+  return row === null || typeof row === "number" ? row : Math.min(row.first * 2 ** (streak - 1), row.max);
 }
+
+/** The trouble after one more failure. @param {Trouble | null} prev @param {Failure} failure @returns {Trouble} */
+export const troubleAfter = (prev, failure) => ({ failure, streak: prev !== null && prev.failure.kind === failure.kind ? prev.streak + 1 : 1 });
 
 /** "45s", "3m 29s", "1h 5m"; a check still running counts to `now` (ms). Empty when it has not started. */
 export function duration(startedAt, completedAt, now) {

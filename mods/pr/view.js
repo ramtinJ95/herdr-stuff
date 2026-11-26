@@ -1,4 +1,5 @@
-import { POLL, describeFailure, groups } from "./model.js";
+import { firstLine } from "./github.js";
+import { POLL, describeFailure, groups, plural } from "./model.js";
 
 /** @typedef {import("./github.js").Snapshot} Snapshot */
 /** @typedef {import("./github.js").Check} Check */
@@ -7,11 +8,10 @@ import { POLL, describeFailure, groups } from "./model.js";
 /** @typedef {ReturnType<typeof groups>[number]} Group */
 /** @typedef {{ kind: "group", key: string, group: Group, open: boolean } | { kind: "check", key: string, check: Check } | { kind: "hidden", key: string, count: number } | { kind: "about", key: "about", open: boolean }} Row */
 /** @typedef {import("./github.js").About} About */
-/** @typedef {{ host: string, owner: string, name: string, number: number }} Target */
 
-export const PASSED_SHOWN = 8;
+const PASSED_SHOWN = 8;
 
-export function opensByDefault(group, all) {
+function opensByDefault(group, all) {
   if (group.key === "skipping") return false;
   if (group.key !== "pass") return true;
   return group.checks.length <= PASSED_SHOWN && !all.some((g) => g.key === "fail" || g.key === "pending");
@@ -30,6 +30,10 @@ export function rowsOf(snapshot, folds) {
 
 /** The pane's rows: the description, then the checks. */
 export const paneRows = (snapshot, folds, aboutOpen) => /** @type {Row[]} */ ([{ kind: "about", key: "about", open: aboutOpen }, ...rowsOf(snapshot, folds)]);
+
+/** Where `o` goes from a row: the check's own page, the pull request from its description, else the pull request's checks. */
+export const rowUrl = (row, snapshot) =>
+  (row.kind === "check" && row.check.link !== null ? row.check.link : row.kind === "about" ? snapshot.pr.url : `${snapshot.pr.url}/checks`);
 
 function indexOf(rows, key) {
   const own = rows.findIndex((r) => r.key === key);
@@ -76,12 +80,6 @@ export const stepLink = (check, step) => (check.link === null ? null : `${check.
 const pad = (n) => String(n).padStart(2, "0");
 const clock = (ms) => `${pad(new Date(ms).getHours())}:${pad(new Date(ms).getMinutes())}`;
 
-export function resetAtOf(raw) {
-  const at = raw?.data?.rateLimit?.resetAt;
-  const ms = typeof at === "string" ? Date.parse(at) : NaN;
-  return Number.isNaN(ms) ? null : ms;
-}
-
 const FIXES = {
   "no-gh": "Install the GitHub CLI, then run `gh auth login` in a terminal.",
   "no-auth": "Run `gh auth login` in a terminal.",
@@ -93,7 +91,7 @@ export function failureLines(failure, resetAt, now) {
   if (failure.kind === "rate-limited") {
     return { headline, tone, fix: resetAt !== null && resetAt > now ? `It resets at ${clock(resetAt)}.` : `The pane tries again in ${POLL["rate-limited"] / 60_000} minutes.` };
   }
-  return { headline, tone, fix: FIXES[failure.kind] ?? (failure.kind === "unknown" ? failure.text.split("\n")[0].trim() || null : null) };
+  return { headline, tone, fix: FIXES[failure.kind] ?? (failure.kind === "unknown" ? firstLine(failure.text).trim() || null : null) };
 }
 
 export function ago(ms, now) {
@@ -102,18 +100,15 @@ export function ago(ms, now) {
   if (s < 60) return `${s} s ago`;
   if (s < 3600) return `${Math.floor(s / 60)} min ago`;
   if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
-  const days = Math.floor(s / 86400);
-  return `${days} day${days === 1 ? "" : "s"} ago`;
+  return `${plural(Math.floor(s / 86400), "day")} ago`;
 }
 
 /** Whether what is shown is GitHub's latest answer: not a saved copy, not the last good one after a failed poll. */
 export const liveShown = (shown, trouble) => shown.source === "live" && trouble === null;
 
-const count = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-
 /** Who opened the PR and when, and how much is on it. @param {About} about */
 export const aboutLine = (about, now) =>
-  [`${about.author ?? "A deleted account"} opened it ${ago(Date.parse(about.createdAt), now)}`, count(about.commits, "commit"), ...about.comments > 0 ? [count(about.comments, "comment")] : []].join(" · ");
+  [`${about.author ?? "A deleted account"} opened it ${ago(Date.parse(about.createdAt), now)}`, plural(about.commits, "commit"), ...about.comments > 0 ? [plural(about.comments, "comment")] : []].join(" · ");
 
 const REVIEW_WORDS = {
   APPROVED: ["approved", "done"], CHANGES_REQUESTED: ["asked for changes", "blocked"], DISMISSED: ["review dismissed", "idle"],

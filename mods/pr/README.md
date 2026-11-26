@@ -57,10 +57,10 @@ There is no `pr.merge` command: `herdr-app do` and key bindings cannot merge.
 ## When it asks GitHub
 
 - Every 10 seconds while checks run, every 60 seconds for an open pull request whose checks have settled, never for a merged or closed one. `POLL` in `model.js` holds the delays.
-- The description on the first look, and again only when the pull request's `updatedAt` moves: an edit, a comment, a review, a push. One more call of 1 point, about 0.5 s.
+- The description while its row is open, and again only when the pull request's `updatedAt` moves: an edit, a comment, a review, a push. One more call of 1 point, about 0.5 s. Folded, it is not asked for.
 - Not at all while the window is hidden or the pane's tab is not the one shown. It asks at once when the tab shows again.
-- Each poll is one query, plus one for the steps of up to 6 running jobs. Each costs 1 point of GitHub's 5,000 an hour. A pane left visible on a running pull request uses about 650 an hour.
-- It opens on the last answer it saw for that pull request, marked with its age, and replaces it when the fresh one lands.
+- Each poll is one query, plus one beside it for the steps of up to 6 running jobs. A finished job's steps are asked for once and kept. Selecting a check asks for its steps alone, not a poll. Each call costs 1 point of GitHub's 5,000 an hour, so a pane left visible on a running pull request uses about 650 an hour.
+- It opens on the last answer it saw for that pull request, description included, marked with its age, and replaces it when the fresh one lands.
 
 It shows no toasts and opens nothing over the window. Errors are a line in the pane.
 
@@ -80,12 +80,12 @@ It draws with `theme()` and the terminal palette (`ansi1`, `ansi2`, `ansi3`) for
 
 ## Data
 
-The pane asks `gh` about the pull request for the branch checked out in a folder. It reads the answers in three files, and `merge.js` holds the one thing it changes.
+The pane asks `gh` about the pull request for the branch checked out in a folder. It reads the answers in three files, and `merge.js` holds the one thing it changes. `main.js` runs one call at a time: a confirmed merge, else the poll or lookup that is due, else the steps and description the snapshot lacks.
 
-- `query.js` holds the GraphQL that the pane and `record.js` share. `PR_QUERY` is the poll. It asks for steps only with `$steps`, because steps make a poll about three times slower. `STEPS_QUERY` asks for the steps of a few check runs by node id. `ABOUT_QUERY` asks for the description, author, labels and reviewers, apart from the poll because none of it moves with CI. `prArgs`, `stepsArgs` and `aboutArgs` build the `gh api graphql` arguments.
-- `github.js` is the boundary. `parsePr` turns a `PR_QUERY` answer into a `Snapshot` and throws a `GhError` with a `kind` when the answer has errors or a field it does not read. `mergeSteps` sets the steps from a `STEPS_QUERY` answer on a snapshot. `parseAbout` turns an `ABOUT_QUERY` answer into an `About`. `prLookupArgs` and `parseLookup` find the pull request for a folder's branch with `gh pr view`. `classifyFailure` names what went wrong from a non-zero exit, and `classifyRejection` does the same for a rejected `exec` or a `GhError`.
-- `model.js` is pure. `summarize` gives the stage, the CI state, what blocks the merge, the headline and its tone. `groups` gives the check rows in display order. `stepsWanted` picks the checks to ask steps for. `nextPollDelay` reads the `POLL` table. `offersMerge` says whether the pane offers Merge. `describeFailure` gives the line for a failure. `duration` formats elapsed time.
-- `merge.js` is Merge. `mergePress` says what a press does and `armedHolds` whether the first press still stands, both pure. `confirmMerge` is the second press: it takes the function that runs `gh`, so `merge.test.js` runs it against a recorded answer and a stand-in for `gh pr merge`.
+- `query.js` holds the GraphQL. `PR_QUERY` is the poll, which `record.js` shares. It asks for steps only with `$steps`, because steps make a poll about three times slower, and it carries the repository's merge methods, so Merge needs no call of its own. `STEPS_QUERY` asks for the steps of a few check runs by node id. `ABOUT_QUERY` asks for the description, author, labels and reviewers, apart from the poll because none of it moves with CI. `prArgs`, `stepsArgs` and `aboutArgs` build the `gh api graphql` arguments from where the pull request lives.
+- `github.js` is the boundary. `parsePr` turns a `PR_QUERY` answer into a `Snapshot` and throws a `GhError` with a `kind` when the answer has errors or a field it does not read. `mergeSteps` sets the steps from a `STEPS_QUERY` answer on a snapshot. `parseAbout` turns an `ABOUT_QUERY` answer into an `About`. `prLookupArgs` and `parseLookup` find the pull request for a folder's branch with `gh pr view`. `classifyFailure` names what went wrong from a non-zero exit, and `classifyRejection` does the same for a rejected `exec` or a `GhError`. `readAnswer` reads a gh run with a parser and gives the value or the failure.
+- `model.js` is pure. `summarize` gives the stage, the CI state, what blocks the merge, the headline and its tone. `groups` gives the check rows in display order. `stepsWanted` picks the checks to ask steps for, and `keepSteps` carries a finished job's steps into the next poll's snapshot. `nextPollDelay` and `failureDelay` read the `POLL` table. `offersMerge` says whether the pane offers Merge. `describeFailure` gives the line for a failure. `duration` formats elapsed time.
+- `merge.js` is Merge. `mergeOffer` is the one reading of it: no button, a note, the button off, at rest or armed. The row is drawn from that offer and `mergePress` says what a press does to it, both pure. `confirmMerge` is the second press: it takes the function that runs `gh`, so `merge.test.js` runs it against a recorded answer and a stand-in for `gh pr merge`.
 
 The checks follow the GitHub CLI's own rules from `gh pr checks` (`aggregate.go`, `output.go` in cli/cli). A check's state is its conclusion when completed, else its status, and the state maps to a bucket: `pass`, `fail`, `pending`, `skipping` or `cancel`. `STARTUP_FAILURE`, `STALE` and any state gh does not list count as `pending`, as in gh. Re-runs are removed as gh removes them: latest start first, then the first check per status context, or per name, workflow and event. The CI kind is the first of `fail`, `pending` and `cancel` with a check in it, else `pass`, or `none` with no checks. It counts the required checks when the PR has any, and all checks otherwise. `ci.all` always counts all of them, so an optional failure stays visible.
 
@@ -125,11 +125,11 @@ The query returns 100 checks at most. `hidden` counts the rest from `totalCount`
 | Approved and clean | synthetic: `survive-n-conquest-62` frame 2, `APPROVED` | open | pass | ready | Ready to merge | done | 60 s |
 | More than 100 checks | synthetic: `first-game-145`, `OPEN`, `CLEAN`, `totalCount` 130 | open | pass, 105 hidden | ready | Ready to merge | done | 60 s |
 
-The poll is `nextPollDelay` with the pane shown. A hidden pane, a merged or closed PR, and a missing `gh`, login or repository wait until asked (`never` above). Offline and unknown failures back off from 15 s, doubling to 5 minutes. A rate limit waits 5 minutes.
+The poll is `nextPollDelay` for a pull request and `failureDelay` for a failure. A merged or closed PR, and a missing `gh`, login or repository wait until asked (`never` above). Offline and unknown failures back off from 15 s, doubling to 5 minutes. A rate limit waits 5 minutes. A pane that is not on screen does not poll at all, whatever the table says: `main.js` holds that.
 
 ## Recording and replaying
 
-The tests replay recordings of real pull requests through `parsePr` and `summarize`, and compare them with what `gh pr checks --json` reported at the same moment.
+The tests replay recordings of real pull requests through `parsePr` and `summarize`, and compare them with what `gh pr checks --json` reported at the same moment. `recorded.js` loads the recordings for them.
 
 1. Record. `node mods/pr/record.js <folder> <owner/repo>...` polls every open PR with running checks and writes one JSON line per change. `--pr owner/repo#N` records one PR until it settles. Each line has the `PR_QUERY` answer with steps, the REST jobs, and `gh pr checks` taken right after as `oracle`. `oracle.steady` is true when the PR answer did not change across the `gh pr checks` call. Only steady frames are compared.
 2. Pack. `node mods/pr/pack.js <folder or file>...` writes one gzipped file per recording into `fixtures/`. It drops the REST jobs, refuses any frame from a repository not on its public allow list, and fails above 1.5 MB.

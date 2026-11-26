@@ -1,21 +1,21 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { summarize } from "./model.js";
-import { aboutLine, ago, blockerWords, currentStep, failureLines, headlineOf, liveShown, moveSelection, paneRows, resetAtOf, reviewerWords, rowsOf, selectedRow, stepLink } from "./view.js";
+import { aboutLine, ago, blockerWords, currentStep, failureLines, headlineOf, liveShown, moveSelection, paneRows, reviewerWords, rowUrl, rowsOf, selectedRow, stepLink } from "./view.js";
 
 let ids = 0;
 const check = (bucket, extra = {}) => ({
   id: `c${++ids}`, kind: "run", name: `job ${ids}`, workflow: "CI", event: "pull_request", app: "github-actions",
   state: { pass: "SUCCESS", fail: "FAILURE", pending: "IN_PROGRESS", skipping: "SKIPPED", cancel: "CANCELLED" }[bucket],
   bucket, required: false, startedAt: "2026-11-26T18:00:00Z", completedAt: null, link: `https://github.com/o/r/actions/runs/1/job/${ids}`,
-  description: null, runId: 1, steps: null, ...extra,
+  description: null, steps: null, ...extra,
 });
 const pr = (extra = {}) => ({
   number: 146, title: "t", url: "https://github.com/o/r/pull/146", state: "OPEN", draft: false, head: "a".repeat(40),
-  headRef: "feat/x", baseRef: "main", fork: false, mergeable: "MERGEABLE", mergeState: "CLEAN", review: null,
-  unresolvedThreads: 0, additions: 1, deletions: 1, files: 1, ...extra,
+  headRef: "feat/x", baseRef: "main", mergeable: "MERGEABLE", mergeState: "CLEAN", review: null,
+  additions: 1, deletions: 1, files: 1, ...extra,
 });
-const snapshot = (checks, extra = {}) => ({ pr: pr(extra.pr), checks, hidden: extra.hidden ?? 0, rateLimit: null });
+const snapshot = (checks, extra = {}) => ({ pr: pr(extra.pr), checks, hidden: extra.hidden ?? 0, resetAt: null });
 const keys = (rows) => rows.map((r) => (r.kind === "group" ? `${r.group.key}${r.open ? "+" : "-"}` : r.kind === "hidden" ? `hidden ${r.count}` : r.check.bucket));
 
 test("failed, running and cancelled show their checks; passed folds when anything failed; skipped always folds", () => {
@@ -92,9 +92,12 @@ test("each failure says what went wrong and, where there is one, the fix", () =>
   assert.equal(failureLines({ kind: "no-repo", text: "failed to run git: fatal: not a git repository" }, null, now).fix, null);
 });
 
-test("the rate limit's reset time is read from the answer when it is there", () => {
-  assert.equal(resetAtOf({ data: { rateLimit: { resetAt: "2026-11-26T18:29:13Z" } } }), Date.parse("2026-11-26T18:29:13Z"));
-  assert.equal(resetAtOf({ errors: [{ type: "RATE_LIMITED" }] }), null);
+test("o opens the selected check's page, the pull request from its description, else the pull request's checks", () => {
+  const linked = check("fail"), bare = check("fail", { link: null });
+  const s = snapshot([linked, bare], { hidden: 3 });
+  const rows = paneRows(s, new Map(), true);
+  assert.deepEqual(rows.map((row) => row.kind), ["about", "group", "check", "check", "hidden"]);
+  assert.deepEqual(rows.map((row) => rowUrl(row, s)), [s.pr.url, `${s.pr.url}/checks`, linked.link, `${s.pr.url}/checks`, `${s.pr.url}/checks`]);
 });
 
 test("ages read in the largest whole unit", () => {

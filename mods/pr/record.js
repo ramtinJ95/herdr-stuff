@@ -3,7 +3,17 @@
 // A frame is written only when the answer changed; polls.tsv has every poll, for measuring lag.
 import { execFile } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
-import { OPEN_PRS_QUERY, prArgs } from "./query.js";
+import { graphqlArgs, prArgs } from "./query.js";
+
+const OPEN_PRS_QUERY = `
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, first: 20, orderBy: { field: UPDATED_AT, direction: DESC }) {
+      nodes { number headRefOid commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } }
+    }
+  }
+}`;
+const HOST = "github.com";
 
 const args = process.argv.slice(2);
 const flag = (name, fallback) => { const i = args.indexOf(`--${name}`); return i < 0 ? fallback : args.splice(i, 2)[1]; };
@@ -30,7 +40,7 @@ async function capture(repo, number) {
   const rec = live.get(key) ?? { file: `${out}/${name}-${number}-${new Date().toISOString().replace(/[:.]/g, "")}.jsonl`, last: "", quiet: 0, frames: 0, polls: 0, since: Date.now() };
   live.set(key, rec);
   const at = new Date().toISOString();
-  const res = await gh(prArgs(owner, name, number, true));
+  const res = await gh(prArgs({ host: HOST, owner, name, number }, { steps: true }));
   const body = json(res), pr = body.data?.repository?.pullRequest ?? null, rollup = rollupOf(pr);
   const runs = [...new Set((rollup?.contexts?.nodes ?? []).map((c) => c.checkSuite?.workflowRun?.databaseId).filter(Boolean))];
   const fetched = await Promise.all(runs.sort().map(async (id) => [id, json(await gh(["api", `repos/${repo}/actions/runs/${id}/jobs?per_page=100`]))]));
@@ -40,7 +50,7 @@ async function capture(repo, number) {
   appendFileSync(`${out}/polls.tsv`, `${at}\t${key}\t${res.ms}\t${body.data?.rateLimit?.cost ?? ""}\t${body.data?.rateLimit?.remaining ?? ""}\t${shown === rec.last ? "same" : "changed"}\n`);
   if (shown !== rec.last) {
     const oracle = await gh(["pr", "checks", String(number), "-R", repo, "--json", ORACLE]);
-    const again = json(await gh(prArgs(owner, name, number, true)));
+    const again = json(await gh(prArgs({ host: HOST, owner, name, number }, { steps: true })));
     const steady = JSON.stringify(again.data?.repository?.pullRequest ?? null) === JSON.stringify(pr);
     appendFileSync(rec.file, JSON.stringify({ at, repo, number, ms: res.ms, rateLimit: body.data?.rateLimit ?? null, pr, errors: body.errors ?? null, jobs,
       oracle: { code: oracle.code, checks: json(oracle), stderr: oracle.stderr, steady } }) + "\n");
@@ -65,7 +75,7 @@ while (Date.now() < end) {
       listed = Date.now();
       for (const repo of repos) {
         const [owner, name] = repo.split("/");
-        const body = json(await gh(["api", "graphql", "-f", `query=${OPEN_PRS_QUERY}`, "-F", `owner=${owner}`, "-F", `name=${name}`]));
+        const body = json(await gh(graphqlArgs(HOST, OPEN_PRS_QUERY, ["-F", `owner=${owner}`, "-F", `name=${name}`])));
         for (const pr of body.data?.repository?.pullRequests?.nodes ?? []) {
           const key = `${repo}#${pr.number}`, moved = heads.has(key) && heads.get(key) !== pr.headRefOid;
           heads.set(key, pr.headRefOid);

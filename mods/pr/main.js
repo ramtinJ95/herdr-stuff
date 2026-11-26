@@ -2,28 +2,31 @@ import { View } from "gpui-kit";
 import { ScrollHandle } from "gpui-base";
 import { checking, exec, focused, nextCommand, panes, props, readTextFile, run, settings, spaces, window as appWindow } from "herdr";
 import { aboutArgs, prArgs, stepsArgs } from "./query.js";
-import { classifyFailure, classifyRejection, mergeSteps, parseAbout, parseLookup, parsePr, prLookupArgs } from "./github.js";
-import { nextPollDelay, offersMerge, stepsWanted, summarize } from "./model.js";
-import { liveShown, moveSelection, paneRows, resetAtOf, selectedRow } from "./view.js";
-import { armedHolds, confirmMerge, mergeMethod, mergePress, repoViewArgs } from "./merge.js";
+import { classifyFailure, classifyRejection, firstLine, frameAnswer, mergeSteps, parseAbout, parseLookup, parsePr, prLookupArgs, readAnswer } from "./github.js";
+import { failureDelay, keepSteps, nextPollDelay, offersMerge, stepsWanted, summarize, troubleAfter } from "./model.js";
+import { liveShown, moveSelection, paneRows, rowUrl, selectedRow } from "./view.js";
+import { confirmMerge, mergeMethod, mergeOffer, mergePress } from "./merge.js";
 import { WIDE_PX, drawPane } from "./draw.js";
 
 /** @typedef {import("./github.js").Snapshot} Snapshot */
-/** @typedef {import("./github.js").Failure} Failure */
 /** @typedef {import("./github.js").About} About */
-/** @typedef {import("./view.js").Target} Target */
+/** @typedef {import("./github.js").Target} Target */
+/** @typedef {import("./model.js").Trouble} Trouble */
 /** @typedef {import("./merge.js").MergeMethod} MergeMethod */
 /** @typedef {import("./merge.js").MergeUi} MergeUi */
 /** @typedef {{ cwd: string, branch: string | null, machine: string | null }} Place */
-/** @typedef {{ failure: Failure, streak: number }} Trouble */
-/** @typedef {{ snapshot: Snapshot, fetchedAt: number, source: "cache" | "live" | "replay" }} Shown */
-/** @typedef {{ ask: "unasked" } | { ask: "known", method: MergeMethod | null } | { ask: "failed", text: string }} Methods */
+/** What is drawn of a pull request: the poll's snapshot and the description read apart from it. @typedef {{ snapshot: Snapshot, about: About | null, fetchedAt: number, source: "cache" | "live" | "replay" }} Shown */
+/**
+ * `method` is undefined until GitHub has answered with the repository's merge methods.
+ * @typedef {{ phase: "showing", place: Place, target: Target, localHead: string | null, method: MergeMethod | null | undefined,
+ *   shown: Shown | null, trouble: Trouble | null, stepsError: string | null, aboutError: string | null }} Showing
+ */
 /**
  * @typedef {{ phase: "idle" }
  *   | { phase: "locating", place: Place, shown: Shown | null }
  *   | { phase: "failed", place: Place, trouble: Trouble }
  *   | { phase: "no-pr", place: Place }
- *   | { phase: "showing", place: Place, target: Target, localHead: string | null, methods: Methods, shown: Shown | null, trouble: Trouble | null, stepsError: string | null, about: About | null, aboutError: string | null }
+ *   | Showing
  *   | { phase: "replay", file: string, shown: Shown | null, trouble: Trouble | null }} State
  */
 
@@ -38,10 +41,11 @@ const ABOUT_OPEN = "pr:v1:about-open";
 const cacheKey = (target) => `pr:v1:${target.host}/${target.owner}/${target.name}#${target.number}`;
 const placeKey = (place) => (place === null ? null : JSON.stringify([place.machine, place.cwd, place.branch]));
 const after = (ms) => (ms === null ? null : Date.now() + ms);
+const save = (key, value) => localStorage.setItem(key, JSON.stringify(value));
 const IDLE = /** @type {MergeUi} */ ({ step: "idle" });
-const KEYS = { j: "down", down: "down", k: "up", up: "up", enter: "toggle", space: "toggle", o: "open", r: "refresh", m: "merge", escape: "escape", q: "close" };
-/** What `herdr-app do pr.<action>` may do. Merge is not among them: it takes two presses in the pane, by someone looking at it. */
-const ACTIONS = new Set(Object.values(KEYS).filter((action) => action !== "merge"));
+const KEYS = { j: "down", down: "down", k: "up", up: "up", enter: "toggle", space: "toggle", o: "open", r: "refresh", escape: "escape", q: "close" };
+/** What `herdr-app do pr.<command>` and key bindings may do. Merge is not here: it takes two presses in the pane, by someone looking at it. */
+const COMMANDS = new Set(["down", "up", "toggle", "open", "refresh", "escape", "close"]);
 
 export default class PullRequest extends View {
   init(_props, cx) {
@@ -55,7 +59,10 @@ export default class PullRequest extends View {
     this.merge = IDLE;
     this.follow = null;
     this.gen = 0;
+    /** When the next poll or lookup is due, in ms; null is "not until asked". */
     this.due = null;
+    /** Set when what is wanted beside the snapshot may have changed: another check selected, the description opened. */
+    this.more = false;
     this.busy = false;
     this.wasShown = false;
     this.resetAt = null;
@@ -64,7 +71,6 @@ export default class PullRequest extends View {
     this.aboutOpen = this.saved(ABOUT_OPEN, true) === true;
     this.expanded = false;
     this.wide = false;
-    this.reveal = false;
     this.handle = cx.focus_handle();
     this.scroll = ScrollHandle.new();
     if (checking()) return;
@@ -76,7 +82,7 @@ export default class PullRequest extends View {
       for (;;) {
         const command = await nextCommand();
         if (command === "focus") this.handle.focus();
-        else if (ACTIONS.has(command) && focused()?.tab === this.tab) {
+        else if (COMMANDS.has(command) && focused()?.tab === this.tab) {
           this.disarm(cx);
           this.act(command, cx);
         }
@@ -104,9 +110,10 @@ export default class PullRequest extends View {
       this.merge = IDLE;
       this.selected = null;
       this.folds = new Map();
+      this.more = false;
       this.due = Date.now();
     }
-    const lapsed = this.merge.step === "armed" && !this.armed();
+    const lapsed = this.merge.step === "armed" && this.offer(Date.now()).look !== "armed";
     if (lapsed) this.merge = IDLE;
     this.pump(cx);
     return moved || lapsed;
@@ -117,25 +124,46 @@ export default class PullRequest extends View {
     return (appWindow()?.visible !== false || phase === "locating") && focused()?.tab === this.tab;
   }
 
+  /** Runs the one thing there is to do, if nothing is running; whatever it was, it looks again when done. */
   pump(cx) {
     const s = this.state;
     if (checking() || s.phase === "idle" || s.phase === "replay") return;
     const shown = this.onScreen(s.phase);
     if (shown && !this.wasShown && this.due === null) this.due = Date.now();
     this.wasShown = shown;
-    if (this.busy || !shown || this.due === null || Date.now() < this.due || this.merge.step === "running") return;
-    this.due = null;
+    if (this.busy) return;
+    const job = this.job(s, shown);
+    if (job === null) return;
     this.busy = true;
     const gen = this.gen;
     cx.spawn(async (cx) => {
       try {
-        if (s.phase === "showing") await this.poll(cx, gen);
-        else await this.lookup(cx, gen, s.place);
+        await job(cx, gen);
       } finally {
         this.busy = false;
       }
       this.pump(cx);
     });
+  }
+
+  /**
+   * What to do now: a merge that was confirmed, else, while the pane is on screen, the poll or lookup that is due,
+   * else whatever is wanted beside the snapshot.
+   * @returns {((cx: any, gen: number) => Promise<void>) | null}
+   */
+  job(s, shown) {
+    if (this.merge.step === "running") return (cx, gen) => this.runMerge(cx, gen);
+    if (!shown) return null;
+    if (this.due !== null && Date.now() >= this.due) {
+      this.due = null;
+      return s.phase === "showing" ? (cx, gen) => this.poll(cx, gen) : (cx, gen) => this.lookup(cx, gen, s.place);
+    }
+    return s.phase === "showing" && this.more ? (cx, gen) => this.parts(cx, gen) : null;
+  }
+
+  /** The showing state an async step may still write to: null once the terminal has moved or the pull request is no longer shown. @returns {Showing | null} */
+  showing(gen) {
+    return gen === this.gen && this.state.phase === "showing" ? this.state : null;
   }
 
   async gh(argv, place) {
@@ -145,6 +173,11 @@ export default class PullRequest extends View {
     } catch (e) {
       return { code: -1, stdout: "", stderr: "", failure: classifyRejection(e) };
     }
+  }
+
+  /** A gh run read with `parse`: `{ value, failure }`. */
+  async ask(argv, place, parse) {
+    return readAnswer(await this.gh(argv, place), parse);
   }
 
   async head(place) {
@@ -157,126 +190,93 @@ export default class PullRequest extends View {
   }
 
   async lookup(cx, gen, place) {
-    const [found, localHead] = await Promise.all([this.gh(prLookupArgs(), place), this.head(place)]);
+    const found = await this.ask(prLookupArgs(), place, parseLookup);
     if (gen !== this.gen) return;
-    let target = null;
-    let failure = found.failure;
-    if (failure === null) {
-      try {
-        target = parseLookup(found.stdout);
-      } catch (e) {
-        failure = classifyRejection(e);
-      }
-    }
-    if (failure !== null) {
-      const was = this.state;
-      const streak = was.phase === "failed" && was.trouble.failure.kind === failure.kind ? was.trouble.streak + 1 : 1;
-      this.state = failure.kind === "no-pr" ? { phase: "no-pr", place } : { phase: "failed", place, trouble: { failure, streak } };
-      this.due = after(nextPollDelay({ ciKind: null, prState: null, visible: true, error: { kind: failure.kind, streak } }));
+    if (found.failure !== null) {
+      const trouble = troubleAfter(this.state.phase === "failed" ? this.state.trouble : null, found.failure);
+      this.state = found.failure.kind === "no-pr" ? { phase: "no-pr", place } : { phase: "failed", place, trouble };
+      this.due = after(failureDelay(trouble));
       return cx.notify();
     }
+    const target = found.value;
     this.remember(place, target);
-    this.state = { phase: "showing", place, target, localHead, methods: { ask: "unasked" }, shown: this.cached(target), trouble: null, stepsError: null, about: null, aboutError: null };
+    this.state = { phase: "showing", place, target, localHead: null, method: undefined, shown: this.cached(target), trouble: null, stepsError: null, aboutError: null };
     cx.notify();
     await this.poll(cx, gen);
   }
 
   async poll(cx, gen) {
-    const was = /** @type {Extract<State, { phase: "showing" }>} */ (this.state);
+    const was = this.showing(gen);
+    if (was === null) return;
     const { target, place } = was;
-    const detail = this.detailId();
-    const wanted = was.shown === null ? [] : stepsWanted(was.shown.snapshot, detail, STEPS_MAX);
+    const asked = was.shown === null ? [] : stepsWanted(was.shown.snapshot, this.detailId(), STEPS_MAX);
     const [list, steps, localHead] = await Promise.all([
-      this.gh(prArgs(target.owner, target.name, target.number, false, target.host), place),
-      wanted.length === 0 ? null : this.gh(stepsArgs(wanted, target.host), place),
+      this.ask(prArgs(target), place, (stdout) => {
+        const raw = JSON.parse(stdout);
+        return { snapshot: parsePr(raw), method: mergeMethod(raw.data.repository) };
+      }),
+      asked.length === 0 ? null : this.gh(stepsArgs(asked, target.host), place),
       this.head(place),
     ]);
-    if (gen !== this.gen) return;
-    let snapshot = null;
-    let failure = list.failure;
-    if (failure === null) {
-      try {
-        const raw = JSON.parse(list.stdout);
-        this.resetAt = resetAtOf(raw) ?? this.resetAt;
-        snapshot = parsePr(raw);
-      } catch (e) {
-        failure = classifyRejection(e);
-      }
-    }
-    const s = /** @type {Extract<State, { phase: "showing" }>} */ (this.state);
-    if (failure !== null) {
-      if (failure.kind === "no-pr") {
+    const s = this.showing(gen);
+    if (s === null) return;
+    if (list.failure !== null) {
+      if (list.failure.kind === "no-pr") {
         this.state = { phase: "locating", place, shown: null };
         this.due = Date.now();
         return cx.notify();
       }
-      const streak = (s.trouble?.failure.kind === failure.kind ? s.trouble.streak : 0) + 1;
-      this.state = { ...s, localHead, trouble: { failure, streak } };
-      this.due = after(nextPollDelay({ ciKind: null, prState: null, visible: true, error: { kind: failure.kind, streak } }));
+      const trouble = troubleAfter(s.trouble, list.failure);
+      this.state = { ...s, localHead, trouble };
+      this.due = after(failureDelay(trouble));
       return cx.notify();
     }
-    const sum = summarize(snapshot, { localHead });
-    this.land(target, { ...s, localHead, trouble: null, ...steps === null ? { snapshot, stepsError: null } : this.withSteps(snapshot, steps) });
-    this.due = after(nextPollDelay({ ciKind: sum.ci.kind, prState: snapshot.pr.state, visible: true, error: null }));
+    const snapshot = s.shown === null ? list.value.snapshot : keepSteps(list.value.snapshot, s.shown.snapshot);
+    this.resetAt = snapshot.resetAt ?? this.resetAt;
+    /** @type {Showing} */
+    const landed = { ...s, localHead, method: list.value.method, trouble: null, stepsError: null,
+      shown: { snapshot, about: s.shown?.about ?? null, fetchedAt: Date.now(), source: "live" } };
+    this.state = steps === null ? landed : this.withSteps(landed, steps);
+    this.due = after(nextPollDelay(summarize(snapshot).ci.kind, snapshot.pr.state));
     cx.notify();
-    const about = this.readAbout(cx, gen);
-    const late = stepsWanted(snapshot, this.detailId(), STEPS_MAX).filter((id) => !wanted.includes(id));
-    if (late.length > 0 && (was.shown === null || late.includes(this.detailId()))) {
-      const more = await this.gh(stepsArgs(late, target.host), place);
-      if (gen !== this.gen) return;
-      const now = /** @type {Extract<State, { phase: "showing" }>} */ (this.state);
-      this.land(target, { ...now, ...this.withSteps(now.shown.snapshot, more) });
-      cx.notify();
-    }
-    if (offersMerge(sum) && s.methods.ask !== "known") await this.askMethods(cx, gen);
-    await about;
+    await this.parts(cx, gen, asked);
+    const done = this.showing(gen);
+    if (done !== null) this.store(done);
   }
 
-  /** Reads what a person wrote on the PR, when there is none yet or the PR has changed since. */
-  async readAbout(cx, gen) {
-    const was = /** @type {Extract<State, { phase: "showing" }>} */ (this.state);
-    if (was.about !== null && was.about.updatedAt === was.shown.snapshot.pr.updatedAt) return;
+  /**
+   * Reads what the snapshot leaves out, each only when wanted and missing: steps for the selected check and the running ones,
+   * and the description while it is open and older than the pull request. `asked` are the checks whose steps were just asked for.
+   */
+  async parts(cx, gen, asked = []) {
+    this.more = false;
+    const was = this.showing(gen);
+    if (was === null || was.shown === null || was.shown.source !== "live") return;
     const { target, place } = was;
-    const r = await this.gh(aboutArgs(target.owner, target.name, target.number, target.host), place);
-    if (gen !== this.gen) return;
-    const now = /** @type {Extract<State, { phase: "showing" }>} */ (this.state);
-    try {
-      if (r.failure !== null) throw new Error(r.failure.text);
-      this.state = { ...now, about: parseAbout(JSON.parse(r.stdout)), aboutError: null };
-    } catch (e) {
-      this.state = { ...now, aboutError: (e instanceof Error ? e.message : String(e)).split("\n")[0] };
-    }
+    const { snapshot, about } = was.shown;
+    const missing = stepsWanted(snapshot, this.detailId(), STEPS_MAX)
+      .filter((id) => !asked.includes(id) && snapshot.checks.find((c) => c.id === id).steps === null);
+    const behind = this.aboutOpen && about?.updatedAt !== snapshot.pr.updatedAt;
+    if (missing.length === 0 && !behind) return;
+    const [steps, read] = await Promise.all([
+      missing.length === 0 ? null : this.gh(stepsArgs(missing, target.host), place),
+      behind ? this.ask(aboutArgs(target), place, (stdout) => parseAbout(JSON.parse(stdout))) : null,
+    ]);
+    let s = this.showing(gen);
+    if (s === null || s.shown === null) return;
+    if (steps !== null) s = this.withSteps(s, steps);
+    if (read !== null) s = read.failure === null ? { ...s, aboutError: null, shown: { ...s.shown, about: read.value } } : { ...s, aboutError: firstLine(read.failure.text) };
+    this.state = s;
     cx.notify();
   }
 
-  land(target, { snapshot, ...rest }) {
-    const shown = { snapshot, fetchedAt: Date.now(), source: /** @type {const} */ ("live") };
-    this.state = { ...rest, shown };
-    this.store(target, shown);
-  }
-
-  withSteps(snapshot, result) {
+  /** `s` with the steps of a STEPS_QUERY run set on its checks. gh exits 1 beside a partial answer, so its stdout is read either way. @returns {Showing} */
+  withSteps(s, result) {
     try {
-      return { snapshot: mergeSteps(snapshot, JSON.parse(result.stdout)), stepsError: null };
+      return { ...s, stepsError: null, shown: { ...s.shown, snapshot: mergeSteps(s.shown.snapshot, JSON.parse(result.stdout)) } };
     } catch (e) {
-      return { snapshot, stepsError: (result.failure ?? classifyRejection(e)).text };
+      return { ...s, stepsError: firstLine((result.failure ?? classifyRejection(e)).text) };
     }
-  }
-
-  async askMethods(cx, gen) {
-    const s = /** @type {Extract<State, { phase: "showing" }>} */ (this.state);
-    const r = await this.gh(repoViewArgs(s.target), s.place);
-    if (gen !== this.gen) return;
-    /** @type {Methods} */
-    let methods;
-    try {
-      if (r.failure !== null) throw new Error(r.failure.text);
-      methods = { ask: "known", method: mergeMethod(JSON.parse(r.stdout)) };
-    } catch (e) {
-      methods = { ask: "failed", text: e instanceof Error ? e.message : String(e) };
-    }
-    this.state = { .../** @type {Extract<State, { phase: "showing" }>} */ (this.state), methods };
-    cx.notify();
   }
 
   async readReplay(cx, file) {
@@ -284,8 +284,7 @@ export default class PullRequest extends View {
       const text = await readTextFile(file);
       if (text === null) throw new Error(`${file} does not exist`);
       const frame = JSON.parse(text);
-      const snapshot = parsePr({ data: { rateLimit: frame.rateLimit ?? null, repository: { pullRequest: frame.pr } }, errors: frame.errors ?? null });
-      this.state = { phase: "replay", file, shown: { snapshot, fetchedAt: Date.parse(frame.at), source: "replay" }, trouble: null };
+      this.state = { phase: "replay", file, shown: { snapshot: parsePr(frameAnswer(frame)), about: null, fetchedAt: Date.parse(frame.at), source: "replay" }, trouble: null };
     } catch (e) {
       this.state = { phase: "replay", file, shown: null, trouble: { failure: classifyRejection(e), streak: 1 } };
     }
@@ -303,15 +302,19 @@ export default class PullRequest extends View {
   /** @returns {Shown | null} */
   cached(target) {
     const saved = this.saved(cacheKey(target), null);
-    return saved === null ? null : { snapshot: saved.snapshot, fetchedAt: saved.fetchedAt, source: "cache" };
+    return saved === null ? null : { snapshot: saved.snapshot, about: saved.about ?? null, fetchedAt: saved.fetchedAt, source: "cache" };
   }
 
-  store(target, shown) {
+  /** Saves what is shown, without steps: they are read again for the checks that want them. */
+  store({ target, shown }) {
     const key = cacheKey(target);
-    localStorage.setItem(key, JSON.stringify({ snapshot: shown.snapshot, fetchedAt: shown.fetchedAt }));
-    const kept = [.../** @type {string[]} */ (this.saved(CACHE_ORDER, [])).filter((k) => k !== key), key];
+    const { snapshot, about, fetchedAt } = shown;
+    save(key, { snapshot: { ...snapshot, checks: snapshot.checks.map((c) => ({ ...c, steps: null })) }, about, fetchedAt });
+    const order = /** @type {string[]} */ (this.saved(CACHE_ORDER, []));
+    if (order.at(-1) === key) return;
+    const kept = [...order.filter((k) => k !== key), key];
     for (const old of kept.slice(0, -CACHE_KEPT)) localStorage.removeItem(old);
-    localStorage.setItem(CACHE_ORDER, JSON.stringify(kept.slice(-CACHE_KEPT)));
+    save(CACHE_ORDER, kept.slice(-CACHE_KEPT));
   }
 
   /** @returns {Shown | null} */
@@ -322,7 +325,7 @@ export default class PullRequest extends View {
 
   remember(place, target) {
     const { [placeKey(place)]: _, ...rest } = this.saved(PLACES, {});
-    localStorage.setItem(PLACES, JSON.stringify(Object.fromEntries([...Object.entries(rest).slice(-(PLACES_KEPT - 1)), [placeKey(place), target]])));
+    save(PLACES, Object.fromEntries([...Object.entries(rest).slice(-(PLACES_KEPT - 1)), [placeKey(place), target]]));
   }
 
   snapshot() {
@@ -339,39 +342,32 @@ export default class PullRequest extends View {
     return row?.kind === "check" && (this.wide || this.expanded) ? row.check.id : null;
   }
 
-  needsSteps() {
-    const snapshot = this.snapshot();
-    const id = this.detailId();
-    return snapshot !== null && id !== null && stepsWanted(snapshot, id, 1)[0] === id && snapshot.checks.find((c) => c.id === id)?.steps === null;
-  }
-
-  wantSteps() {
-    if (this.state.phase === "showing" && this.needsSteps()) this.due = Date.now();
-  }
-
   select(key) {
     this.selected = key;
-    this.wantSteps();
+    this.more = true;
   }
 
   clickRow(cx, row) {
     if (row.kind === "group") this.folds.set(row.group.key, !row.open);
     if (row.kind === "about") {
       this.aboutOpen = !row.open;
-      localStorage.setItem(ABOUT_OPEN, JSON.stringify(this.aboutOpen));
+      save(ABOUT_OPEN, this.aboutOpen);
     }
-    if (row.kind === "hidden") this.openChecksPage();
+    if (row.kind === "hidden") cx.open_url(rowUrl(row, this.snapshot()));
     if (row.kind === "check") this.expanded = row.key === selectedRow(this.rows(), this.selected)?.key ? !this.expanded : true;
     this.select(row.key);
     cx.notify();
   }
 
   key(e, cx) {
-    const action = KEYS[e.keystroke];
-    if (action !== "merge") this.disarm(cx);
-    if (action === undefined) return;
-    if (action === "merge") this.pressMerge(cx, e.is_held === true);
-    else this.act(action, cx);
+    if (e.keystroke === "m") {
+      this.pressMerge(cx, e.is_held === true);
+    } else {
+      this.disarm(cx);
+      const action = KEYS[e.keystroke];
+      if (action === undefined) return;
+      this.act(action, cx);
+    }
     cx.stop_propagation();
   }
 
@@ -380,15 +376,14 @@ export default class PullRequest extends View {
     const row = selectedRow(rows, this.selected);
     if (action === "down" || action === "up") {
       this.select(moveSelection(rows, this.selected, action === "down" ? 1 : -1));
-      this.reveal = true;
+      // Each row is one child of the list, so its place in `rows` is the child to reveal.
+      this.scroll.scroll_to_item(Math.max(0, rows.findIndex((r) => r.key === this.selected)));
     } else if (action === "toggle" && row !== null) {
       if (row.kind === "check") this.expanded = !this.expanded;
       else this.clickRow(cx, row);
-      this.wantSteps();
+      this.more = true;
     } else if (action === "open" && row !== null) {
-      if (row.kind === "check" && row.check.link !== null) this.openUrl(row.check.link);
-      else if (row.kind === "about") this.openUrl(this.snapshot().pr.url);
-      else this.openChecksPage();
+      cx.open_url(rowUrl(row, this.snapshot()));
     } else if (action === "refresh") {
       this.refresh(cx);
     } else if (action === "escape") {
@@ -426,67 +421,47 @@ export default class PullRequest extends View {
     this.pump(cx);
   }
 
-  /** What a press of Merge goes by, or null when there is nothing to merge with. */
-  mergeFacts() {
+  /** What the Merge row is right now. The row is drawn from it and a press goes by it. */
+  offer(now) {
     const s = this.state;
-    if (s.phase !== "showing" || s.shown === null || s.methods.ask !== "known" || s.methods.method === null) return null;
-    const { snapshot } = s.shown;
-    return { offered: offersMerge(summarize(snapshot)), fresh: liveShown(s.shown, s.trouble), head: snapshot.pr.head, now: Date.now() };
-  }
-
-  armed() {
-    const facts = this.mergeFacts();
-    return facts !== null && armedHolds(this.merge, facts);
-  }
-
-  pressMerge(cx, held = false) {
-    const facts = this.mergeFacts();
-    if (facts === null) return;
-    const press = mergePress(this.merge, { ...facts, held });
-    if (press === "nothing") return;
-    const { head } = facts;
-    if (press === "arm") {
-      this.merge = { step: "armed", head, at: facts.now };
-      return cx.notify();
-    }
-    const s = /** @type {Extract<State, { phase: "showing" }>} */ (this.state);
-    const gen = this.gen;
-    const { target, place } = s;
-    const method = /** @type {MergeMethod} */ (/** @type {Extract<Methods, { ask: "known" }>} */ (s.methods).method);
-    this.merge = { step: "running", head };
-    cx.notify();
-    cx.spawn(async (cx) => {
-      while (this.busy) await cx.sleep(100);
-      if (gen !== this.gen) return;
-      this.busy = true;
-      let done;
-      try {
-        done = await confirmMerge((argv) => this.gh(argv, place), target, method, head);
-      } finally {
-        this.busy = false;
-      }
-      if (gen !== this.gen) return;
-      this.merge = done;
-      this.due = Date.now();
-      cx.notify();
-      this.pump(cx);
+    const shown = "shown" in s ? s.shown : null;
+    if (shown === null) return /** @type {import("./merge.js").Offer} */ ({ look: "none" });
+    const { pr } = shown.snapshot;
+    return mergeOffer(this.merge, {
+      offered: offersMerge(summarize(shown.snapshot)), replay: s.phase === "replay", live: s.phase === "showing" && liveShown(shown, s.trouble),
+      method: s.phase === "showing" ? s.method : undefined, head: pr.head, base: pr.baseRef, now,
     });
   }
 
-  openChecksPage() {
-    const snapshot = this.snapshot();
-    if (snapshot !== null) this.openUrl(`${snapshot.pr.url}/checks`);
+  pressMerge(cx, held = false) {
+    if (this.merge.step === "done") this.merge = IDLE;
+    const now = Date.now();
+    const press = mergePress(this.offer(now), { now, held });
+    if (press === "arm") this.merge = { step: "armed", head: this.snapshot().pr.head, at: now };
+    if (press === "confirm") this.merge = { step: "running", head: /** @type {Extract<MergeUi, { step: "armed" }>} */ (this.merge).head };
+    cx.notify();
+    this.pump(cx);
   }
 
-  openUrl(url) {
-    exec(appWindow()?.platform === "macos" ? "open" : "xdg-open", [url]);
+  async runMerge(cx, gen) {
+    const s = this.showing(gen);
+    const { merge } = this;
+    if (s === null || !s.method || merge.step !== "running") {
+      this.merge = IDLE;
+      return cx.notify();
+    }
+    const done = await confirmMerge((argv) => this.gh(argv, s.place), s.target, s.method, merge.head);
+    if (gen !== this.gen) return;
+    this.merge = done;
+    this.due = Date.now();
+    cx.notify();
   }
 
   resized(size, cx) {
     const wide = size.width / Number(settings().zoom ?? 1) >= WIDE_PX;
     if (wide === this.wide) return;
     this.wide = wide;
-    this.wantSteps();
+    this.more = true;
     cx.notify();
   }
 

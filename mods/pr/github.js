@@ -5,14 +5,16 @@
 /**
  * @typedef {{ id: string, kind: "run" | "status", name: string, workflow: string | null, event: string | null, app: string | null,
  *   state: string, bucket: Bucket, required: boolean, startedAt: string | null, completedAt: string | null, link: string | null,
- *   description: string | null, runId: number | null, steps: Step[] | null }} Check
+ *   description: string | null, steps: Step[] | null }} Check
  */
+/** Where a pull request lives. @typedef {{ host: string, owner: string, name: string, number: number }} Target */
 /**
+ * `resetAt` is when the rate limit starts over, in ms.
  * @typedef {{ pr: { number: number, title: string, url: string, state: "OPEN" | "CLOSED" | "MERGED", draft: boolean, head: string,
- *   headRef: string, baseRef: string, fork: boolean, mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN",
+ *   headRef: string, baseRef: string, mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN",
  *   mergeState: "CLEAN" | "HAS_HOOKS" | "UNSTABLE" | "BLOCKED" | "BEHIND" | "DIRTY" | "DRAFT" | "UNKNOWN",
- *   review: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null, unresolvedThreads: number, additions: number,
- *   deletions: number, files: number, updatedAt: string }, checks: Check[], hidden: number, rateLimit: { cost: number, remaining: number } | null }} Snapshot
+ *   review: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null, additions: number, deletions: number, files: number,
+ *   updatedAt: string }, checks: Check[], hidden: number, resetAt: number | null }} Snapshot
  */
 
 /**
@@ -55,7 +57,6 @@ const is = (test) => (value, path) => (test(value) ? value : unread(path, value)
 const str = is((v) => typeof v === "string");
 const strOrNull = is((v) => v === null || typeof v === "string");
 const int = is(Number.isInteger);
-const intOrNull = is((v) => v === null || Number.isInteger(v));
 const bool = is((v) => typeof v === "boolean");
 const obj = is((v) => typeof v === "object" && v !== null);
 const list = is(Array.isArray);
@@ -77,7 +78,7 @@ function context(n, path) {
     const state = str(n.state, `${path}.state`);
     return { id: str(n.id, `${path}.id`), kind: "status", name: str(n.context, `${path}.context`), workflow: null, event: null, app: null,
       state, bucket: bucketOf(state), required: bool(n.isRequired, `${path}.isRequired`), startedAt: null, completedAt: null,
-      link: strOrNull(n.targetUrl, `${path}.targetUrl`), description: strOrNull(n.description, `${path}.description`), runId: null, steps: null };
+      link: strOrNull(n.targetUrl, `${path}.targetUrl`), description: strOrNull(n.description, `${path}.description`), steps: null };
   }
   if (n.__typename !== "CheckRun") unread(`${path}.__typename`, n.__typename);
   const suite = obj(n.checkSuite, `${path}.checkSuite`);
@@ -91,7 +92,6 @@ function context(n, path) {
     state, bucket: bucketOf(state), required: bool(n.isRequired, `${path}.isRequired`),
     startedAt: strOrNull(n.startedAt, `${path}.startedAt`), completedAt: strOrNull(n.completedAt, `${path}.completedAt`),
     link: strOrNull(n.detailsUrl, `${path}.detailsUrl`), description: null,
-    runId: run === null ? null : intOrNull(run.databaseId, `${path}.checkSuite.workflowRun.databaseId`),
     steps: n.steps === undefined ? null : steps(n.steps, `${path}.steps`),
   };
 }
@@ -130,36 +130,41 @@ const failureOf = (errors) => {
   return new GhError(errors.some((e) => e.type === "RATE_LIMITED") ? "rate-limited" : kindOf(text), text);
 };
 
+/** The pull request in a PR_QUERY or ABOUT_QUERY answer, `{ data, errors }` as gh prints it. Throws a GhError when the answer has errors. */
+function pullRequestOf(raw) {
+  if (Array.isArray(raw?.errors) && raw.errors.length > 0) throw failureOf(raw.errors);
+  const data = obj(raw?.data, "data");
+  return { data, p: obj(obj(data.repository, "data.repository").pullRequest, "data.repository.pullRequest") };
+}
+const at = (field) => `pullRequest.${field}`;
+
+/** A recorded frame as the answer gh printed for it. */
+export const frameAnswer = (frame) => ({ data: { rateLimit: frame.rateLimit ?? null, repository: { pullRequest: frame.pr } }, errors: frame.errors ?? null });
+
 /**
- * The Snapshot in a PR_QUERY answer, `{ data, errors }` as gh prints it. Throws a GhError when the answer has errors
- * or a field this pane does not read.
+ * The Snapshot in a PR_QUERY answer. Throws a GhError when the answer has errors or a field this pane does not read.
  * @returns {Snapshot}
  */
 export function parsePr(raw) {
-  if (Array.isArray(raw?.errors) && raw.errors.length > 0) throw failureOf(raw.errors);
-  const data = obj(raw?.data, "data");
-  const p = obj(obj(data.repository, "data.repository").pullRequest, "data.repository.pullRequest");
-  const at = (field) => `pullRequest.${field}`;
+  const { data, p } = pullRequestOf(raw);
   const commit = obj(obj(list(obj(p.commits, at("commits")).nodes, at("commits.nodes"))[0], at("commits.nodes[0]")).commit, at("commits.nodes[0].commit"));
   const rollup = commit.statusCheckRollup === null ? null : obj(commit.statusCheckRollup, "statusCheckRollup");
   const contexts = rollup === null ? null : obj(rollup.contexts, "statusCheckRollup.contexts");
   const nodes = contexts === null ? [] : list(contexts.nodes, "statusCheckRollup.contexts.nodes");
-  const threads = list(obj(p.reviewThreads, at("reviewThreads")).nodes, at("reviewThreads.nodes"));
   const limit = data.rateLimit ?? null;
   return {
     pr: {
       number: int(p.number, at("number")), title: str(p.title, at("title")), url: str(p.url, at("url")),
       state: oneOf(PR_STATES)(p.state, at("state")), draft: bool(p.isDraft, at("isDraft")),
       head: str(p.headRefOid, at("headRefOid")), headRef: str(p.headRefName, at("headRefName")), baseRef: str(p.baseRefName, at("baseRefName")),
-      fork: bool(p.isCrossRepository, at("isCrossRepository")), mergeable: oneOf(MERGEABLE)(p.mergeable, at("mergeable")),
+      mergeable: oneOf(MERGEABLE)(p.mergeable, at("mergeable")),
       mergeState: oneOf(MERGE_STATES)(p.mergeStateStatus, at("mergeStateStatus")), review: oneOf(REVIEWS)(p.reviewDecision, at("reviewDecision")),
-      unresolvedThreads: threads.filter((t, i) => !bool(t.isResolved, at(`reviewThreads.nodes[${i}].isResolved`))).length,
       additions: int(p.additions, at("additions")), deletions: int(p.deletions, at("deletions")), files: int(p.changedFiles, at("changedFiles")),
       updatedAt: str(p.updatedAt, at("updatedAt")),
     },
     checks: latestOnly(nodes.map((n, i) => context(obj(n, `contexts.nodes[${i}]`), `contexts.nodes[${i}]`))).sort(displayOrder),
     hidden: contexts === null ? 0 : int(contexts.totalCount, "statusCheckRollup.contexts.totalCount") - nodes.length,
-    rateLimit: limit === null ? null : { cost: int(obj(limit, "rateLimit").cost, "rateLimit.cost"), remaining: int(limit.remaining, "rateLimit.remaining") },
+    resetAt: limit === null ? null : Date.parse(str(obj(limit, "rateLimit").resetAt, "rateLimit.resetAt")),
   };
 }
 
@@ -169,9 +174,7 @@ export function parsePr(raw) {
  * @returns {About}
  */
 export function parseAbout(raw) {
-  if (Array.isArray(raw?.errors) && raw.errors.length > 0) throw failureOf(raw.errors);
-  const p = obj(obj(obj(raw?.data, "data").repository, "data.repository").pullRequest, "data.repository.pullRequest");
-  const at = (field) => `pullRequest.${field}`;
+  const { p } = pullRequestOf(raw);
   const nodes = (field) => list(obj(p[field], at(field)).nodes, at(`${field}.nodes`));
   const count = (field) => int(obj(p[field], at(field)).totalCount, at(`${field}.totalCount`));
   const named = (actor, path) => (actor === null ? null : str(obj(actor, path).login ?? actor.name, path));
@@ -233,6 +236,24 @@ const kindOf = (text) => STDERR.find(([, test]) => test.test(text))?.[0] ?? "unk
 export function classifyFailure({ code, stderr }) {
   const text = stderr.trim() || `gh exited ${code}`;
   return { kind: code === 4 ? "no-auth" : kindOf(text), text };
+}
+
+export const firstLine = (text) => text.split("\n")[0];
+
+/**
+ * A gh run read with `parse`: its value, or what went wrong, whether gh failed or `parse` threw.
+ * @template T
+ * @param {{ stdout: string, failure: Failure | null }} result
+ * @param {(stdout: string) => T} parse
+ * @returns {{ value: T, failure: null } | { value: null, failure: Failure }}
+ */
+export function readAnswer(result, parse) {
+  if (result.failure !== null) return { value: null, failure: result.failure };
+  try {
+    return { value: parse(result.stdout), failure: null };
+  } catch (e) {
+    return { value: null, failure: classifyRejection(e) };
+  }
 }
 
 /** What a thrown error means: a GhError from the parsers here, or a rejected `exec` (gh missing, a timeout). @returns {Failure} */

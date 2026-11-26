@@ -1,8 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
-import { gunzipSync } from "node:zlib";
-import { MERGE_ARMED_MS, MERGE_GAP_MS, armedHolds, armedLine, confirmMerge, mergeArgv, mergeMethod, mergePress } from "./merge.js";
+import { MERGE_ARMED_MS, MERGE_GAP_MS, armedLine, confirmMerge, mergeArgv, mergeMethod, mergeOffer, mergePress } from "./merge.js";
+import { SETTLED, answerOf } from "./recorded.js";
 
 test("Merge uses the person's default method when the repo allows it, else the first it allows", () => {
   assert.equal(mergeMethod({ viewerDefaultMergeMethod: "SQUASH", mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: false }), "squash");
@@ -18,47 +17,61 @@ test("the second press runs gh pr merge for that PR, that method and only that h
 });
 
 const HEAD = "a".repeat(40);
-const facts = (extra = {}) => ({ offered: true, fresh: true, head: HEAD, now: 100_000, held: false, ...extra });
+const NOW = 100_000;
+const facts = (extra = {}) => ({ offered: true, replay: false, live: true, method: "squash", head: HEAD, base: "main", now: NOW, ...extra });
 const armedAt = (at, head = HEAD) => ({ step: "armed", head, at });
+const IDLE = { step: "idle" };
+const press = (ui, extra = {}, held = false) => mergePress(mergeOffer(ui, facts(extra)), { now: NOW, held });
 
 test("the first press of Merge arms it, and a second one after the gap confirms", () => {
-  assert.equal(mergePress({ step: "idle" }, facts()), "arm");
-  assert.equal(mergePress({ step: "done", ok: false, text: "x" }, facts()), "arm");
-  assert.equal(mergePress(armedAt(100_000 - MERGE_GAP_MS), facts()), "confirm");
+  assert.deepEqual(mergeOffer(IDLE, facts()), { look: "rest", label: "Merge (squash)" });
+  assert.equal(press(IDLE), "arm");
+  assert.deepEqual(mergeOffer(armedAt(NOW - MERGE_GAP_MS), facts()),
+    { look: "armed", label: "Merge (squash)", note: "Press again to squash-merge aaaaaaa into main", at: NOW - MERGE_GAP_MS });
+  assert.equal(press(armedAt(NOW - MERGE_GAP_MS)), "confirm");
 });
 
 test("a held key or a double-click does not merge: a second press inside the gap does nothing", () => {
-  assert.equal(mergePress({ step: "idle" }, facts({ held: true })), "nothing");
-  assert.equal(mergePress(armedAt(100_000 - 5_000), facts({ held: true })), "nothing");
-  assert.equal(mergePress(armedAt(100_000 - MERGE_GAP_MS + 1), facts()), "nothing");
-  assert.equal(mergePress(armedAt(100_000), facts()), "nothing");
+  assert.equal(press(IDLE, {}, true), "nothing");
+  assert.equal(press(armedAt(NOW - 5_000), {}, true), "nothing");
+  assert.equal(press(armedAt(NOW - MERGE_GAP_MS + 1)), "nothing");
+  assert.equal(press(armedAt(NOW)), "nothing");
 });
 
-test("Merge does nothing on a view that is not GitHub's latest answer, or while a merge runs", () => {
-  assert.equal(mergePress({ step: "idle" }, facts({ fresh: false })), "nothing");
-  assert.equal(mergePress(armedAt(95_000), facts({ fresh: false })), "nothing");
-  assert.equal(mergePress(armedAt(95_000), facts({ offered: false })), "nothing");
-  assert.equal(mergePress({ step: "running", head: HEAD }, facts()), "nothing");
+test("the button is off, and a press does nothing, on a view that is not GitHub's latest answer, in a replay, and while a merge runs", () => {
+  for (const [ui, extra, offer] of [
+    [IDLE, { live: false }, { look: "off", label: "Merge (squash)", note: "Off until GitHub answers again" }],
+    [armedAt(NOW - 5_000), { live: false }, { look: "off", label: "Merge (squash)", note: "Off until GitHub answers again" }],
+    [IDLE, { replay: true, live: false, method: undefined }, { look: "off", label: "Merge", note: "Off in a replay" }],
+    [{ step: "running", head: HEAD }, {}, { look: "off", label: "Merging…", note: null }],
+  ]) {
+    assert.deepEqual(mergeOffer(ui, facts(extra)), offer);
+    assert.equal(press(ui, extra), "nothing");
+  }
 });
 
-test("a first press lapses after a while, when the head commit moves, and when the view goes stale; the next press arms again", () => {
-  assert.equal(armedHolds(armedAt(95_000), facts()), true);
-  assert.equal(armedHolds(armedAt(100_000 - MERGE_ARMED_MS), facts()), false);
-  assert.equal(armedHolds(armedAt(95_000, "b".repeat(40)), facts()), false);
-  assert.equal(armedHolds(armedAt(95_000), facts({ fresh: false })), false);
-  assert.equal(armedHolds(armedAt(95_000), facts({ offered: false })), false);
-  assert.equal(mergePress(armedAt(100_000 - MERGE_ARMED_MS), facts()), "arm");
-  assert.equal(mergePress(armedAt(95_000, "b".repeat(40)), facts()), "arm");
+test("there is no button when Merge is not offered or the repository's methods are not read yet, and a note when it allows none", () => {
+  assert.deepEqual(mergeOffer(armedAt(NOW - 5_000), facts({ offered: false })), { look: "none" });
+  assert.deepEqual(mergeOffer(IDLE, facts({ method: undefined })), { look: "none" });
+  assert.deepEqual(mergeOffer(IDLE, facts({ method: null })), { look: "note", note: "This repository allows no merge method." });
+  assert.equal(press(armedAt(NOW - 5_000), { offered: false }), "nothing");
+  assert.equal(press(IDLE, { method: null }), "nothing");
+});
+
+test("a first press lapses after a while and when the head commit moves; the next press arms again", () => {
+  assert.equal(mergeOffer(armedAt(NOW - MERGE_ARMED_MS + 1), facts()).look, "armed");
+  assert.equal(mergeOffer(armedAt(NOW - MERGE_ARMED_MS), facts()).look, "rest");
+  assert.equal(mergeOffer(armedAt(NOW - 5_000, "b".repeat(40)), facts()).look, "rest");
+  assert.equal(press(armedAt(NOW - MERGE_ARMED_MS)), "arm");
+  assert.equal(press(armedAt(NOW - 5_000, "b".repeat(40))), "arm");
+});
+
+test("the outcome of a merge stands in the row until the next press", () => {
+  assert.deepEqual(mergeOffer({ step: "done", ok: false, text: "Merge failed: x" }, facts({ offered: false })), { look: "done", ok: false, text: "Merge failed: x" });
 });
 
 /** GitHub's recorded answer for an open pull request it reports clean, as `gh api graphql` printed it. */
-function cleanAnswer(edit = () => {}) {
-  const dir = new URL("./fixtures/", import.meta.url);
-  const file = readdirSync(dir).find((f) => f.startsWith("survive-n-conquest-62-"));
-  const frame = JSON.parse(gunzipSync(readFileSync(new URL(file, dir))).toString("utf8").split("\n")[1]);
-  edit(frame.pr);
-  return JSON.stringify({ data: { rateLimit: frame.rateLimit, repository: { pullRequest: frame.pr } }, errors: null });
-}
+const cleanAnswer = (edit) => JSON.stringify(answerOf(SETTLED, 2, edit));
 const TARGET = { host: "github.com", owner: "ramtinJ95", name: "survive-n-conquest", number: 62 };
 const headOf = (answer) => JSON.parse(answer).data.repository.pullRequest.headRefOid;
 /** A stand-in for gh: answers the look with `look`, and `pr merge` with `merge`, keeping every argv it was given. */

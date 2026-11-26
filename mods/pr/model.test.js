@@ -1,50 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { gunzipSync } from "node:zlib";
-import { GhError, classifyFailure, classifyRejection, mergeSteps, parseAbout, parseLookup, parsePr, prLookupArgs } from "./github.js";
-import { POLL, describeFailure, duration, groups, nextPollDelay, offersMerge, stepsWanted, summarize } from "./model.js";
+import { GhError, classifyFailure, classifyRejection, frameAnswer, mergeSteps, parseAbout, parseLookup, parsePr, prLookupArgs } from "./github.js";
+import { POLL, describeFailure, duration, failureDelay, groups, keepSteps, nextPollDelay, offersMerge, stepsWanted, summarize, troubleAfter } from "./model.js";
 import { stepsArgs } from "./query.js";
+import { FAILED, PASSED, PENDING, RUNNING, SETTLED, committed, fixtures, frame, recordings, snapshotOf } from "./recorded.js";
 
 const here = new URL(".", import.meta.url).pathname;
-const fixtures = join(here, "fixtures");
-
-function recordings(dir) {
-  return readdirSync(dir).filter((f) => /\.jsonl(\.gz)?$/.test(f)).sort().map((f) => {
-    const bytes = readFileSync(join(dir, f));
-    const text = (f.endsWith(".gz") ? gunzipSync(bytes) : bytes).toString("utf8");
-    return { name: f.replace(/\.jsonl(\.gz)?$/, ""), frames: text.split("\n").filter(Boolean).map((line) => JSON.parse(line)) };
-  });
-}
-const committed = recordings(fixtures);
 const failures = JSON.parse(readFileSync(join(fixtures, "failures.json"), "utf8"));
 const live = JSON.parse(readFileSync(join(fixtures, "live.json"), "utf8"));
 
-const answer = (frame) => ({ data: { rateLimit: frame.rateLimit, repository: { pullRequest: frame.pr } }, errors: null });
-/** Frame `n`, counted from 1, of the one recording whose name starts with `prefix`. */
-function frame(prefix, n = 1) {
-  const found = committed.filter((r) => r.name.startsWith(prefix));
-  assert.equal(found.length, 1, `one recording starts with ${prefix}`);
-  return structuredClone(found[0].frames[n - 1]);
-}
-const snapshotOf = (prefix, n = 1, edit = () => {}) => {
-  const f = frame(prefix, n);
-  edit(f.pr, f.pr.commits.nodes[0].commit);
-  return parsePr(answer(f));
-};
 const run = (commit, name) => {
   const node = commit.statusCheckRollup.contexts.nodes.find((n) => n.name === name);
   assert.ok(node, `the frame has a check named ${name}`);
   return node;
 };
 const names = (checks) => checks.map((c) => c.name);
-
-const PENDING = "first-game-146-2026-11-26T180250120Z";
-const RUNNING = "first-game-146-2026-11-26T180650776Z";
-const FAILED = "first-game-66-";
-const PASSED = "first-game-145-";
-const SETTLED = "survive-n-conquest-62-";
 
 const asOracle = (c) => JSON.stringify([c.name, c.workflow ?? "", c.event ?? "", c.state, c.bucket, c.link ?? ""]);
 const oracleRow = (o) => JSON.stringify([o.name, o.workflow, o.event, o.state, o.bucket, o.link]);
@@ -63,7 +35,7 @@ function differential(t, recs) {
       const theirs = oracleChecks(f);
       if (!f.oracle.steady) return void left.unsteady++;
       if (theirs === null) return void left["gh failed"]++;
-      const s = parsePr(answer(f));
+      const s = parsePr(frameAnswer(f));
       if (s.hidden > 0) return void left.hidden++;
       assert.deepEqual(s.checks.map(asOracle).sort(), theirs.map(oracleRow).sort(), `${name} frame ${i + 1}: checks`);
       assert.deepEqual(summarize(s).ci.all, bucketTally(theirs.map((o) => o.bucket)), `${name} frame ${i + 1}: counts`);
@@ -86,7 +58,7 @@ test("lifecycle replay: each steady frame's CI kind is what gh's buckets for tha
   for (const { name, frames } of committed) {
     const ours = [], theirs = [];
     for (const f of frames.filter((x) => x.oracle.steady && oracleChecks(x) !== null)) {
-      const s = summarize(parsePr(answer(f)));
+      const s = summarize(parsePr(frameAnswer(f)));
       if (s.ci.basis !== "all") continue;
       ours.push(s.ci.kind);
       theirs.push(ghSummary(oracleChecks(f).map((o) => o.bucket)));
@@ -164,14 +136,14 @@ function tableRow(input) {
   if (input.failure !== undefined) {
     const line = describeFailure(input.failure);
     return ["none", "-", "-", line.headline, line.tone,
-      seconds(nextPollDelay({ ciKind: null, prState: null, visible: true, error: { kind: input.failure.kind, streak: 1 } }))];
+      seconds(failureDelay(troubleAfter(null, input.failure)))];
   }
   const s = summarize(input.snapshot);
-  const ci = `${s.ci.kind}${s.ci.basis === "required" ? " (required)" : ""}${s.ci.hidden > 0 ? `, ${s.ci.hidden} hidden` : ""}`;
+  const ci = `${s.ci.kind}${s.ci.basis === "required" ? " (required)" : ""}${input.snapshot.hidden > 0 ? `, ${input.snapshot.hidden} hidden` : ""}`;
   const merge = s.merge.kind === "ready" ? (s.merge.note === null ? "ready" : `ready (${s.merge.note})`)
     : s.merge.kind === "blocked" ? `blocked: ${s.merge.blockers.map((b) => b.kind).join(", ")}` : s.merge.kind;
   return [s.stage, ci, merge, s.headline, s.tone,
-    seconds(nextPollDelay({ ciKind: s.ci.kind, prState: input.snapshot.pr.state, visible: true, error: null }))];
+    seconds(nextPollDelay(s.ci.kind, input.snapshot.pr.state))];
 }
 
 function stateTable() {
@@ -231,13 +203,6 @@ test("Merge is not offered on UNSTABLE even when every check the pane sees passe
   assert.equal(offersMerge(s), false);
 });
 
-test("the running list holds unfinished checks, oldest start first", () => {
-  const { ci } = summarize(snapshotOf(RUNNING));
-  assert.equal(ci.running.length, 22);
-  assert.deepEqual(names(ci.running.slice(0, 3)), ["capture-shards (5)", "capture-shards (7)", "browser-tests (5)"]);
-  assert.deepEqual(names(ci.running.slice(-1)), ["frame-benches"]);
-});
-
 test("groups: within a group, by workflow and then name, with numbers in order", () => {
   const [passed] = groups(snapshotOf(PENDING, 3));
   assert.equal(passed.key, "pass");
@@ -292,6 +257,25 @@ test("steps inline in a recording carry gh's states and buckets", () => {
   assert.equal(memory.steps[9].state, "IN_PROGRESS");
 });
 
+test("the next poll keeps the steps of a finished job and does not ask for them again; a running job's are asked for", () => {
+  const prev = snapshotOf(PENDING);
+  const done = prev.checks.find((c) => c.completedAt !== null && c.steps.length > 0);
+  const memory = prev.checks.find((c) => c.name === "memory");
+  assert.ok(done, "the frame has a finished job with steps");
+  const fresh = { ...prev, checks: prev.checks.map((c) => ({ ...c, steps: null })) };
+  assert.equal(stepsWanted(fresh, done.id, 3)[0], done.id);
+  const next = keepSteps(fresh, prev);
+  const steps = (c) => next.checks.find((x) => x.id === c.id).steps;
+  assert.deepEqual(steps(done), done.steps);
+  assert.equal(steps(memory), null);
+  assert.equal(stepsWanted(next, done.id, 3).includes(done.id), false);
+  assert.equal(stepsWanted(next, memory.id, 3)[0], memory.id);
+});
+
+test("the snapshot carries when the rate limit starts over", () => {
+  assert.equal(snapshotOf(SETTLED, 2).resetAt, Date.parse(frame(SETTLED, 2).rateLimit.resetAt));
+});
+
 test("a live poll without steps has none, and a steps answer sets them on the runs it names", () => {
   const snapshot = parsePr(live.pr);
   assert.ok(snapshot.checks.length > 0);
@@ -320,7 +304,7 @@ test("a steps answer with no data throws a GhError", () => {
 test("synthetic: a merge state this pane does not know is a GhError, not a guess", () => {
   const f = frame(SETTLED, 2);
   f.pr.mergeStateStatus = "SOMETHING_NEW";
-  assert.throws(() => parsePr(answer(f)), (e) => e instanceof GhError && e.kind === "unknown");
+  assert.throws(() => parsePr(frameAnswer(f)), (e) => e instanceof GhError && e.kind === "unknown");
 });
 
 test("an answer with GraphQL errors is the failure gh's stderr names", () => {
@@ -362,18 +346,28 @@ test("every failure kind has a line to show", () => {
   }
 });
 
-test("polling stops while the pane is hidden, even with checks running", () => {
-  assert.equal(nextPollDelay({ ciKind: "pending", prState: "OPEN", visible: false, error: null }), null);
-});
-
 test("failures that wait on the person stop polling; offline backs off by doubling up to its cap", () => {
-  for (const kind of ["no-gh", "no-auth", "no-repo"]) assert.equal(nextPollDelay({ ciKind: null, prState: null, visible: true, error: { kind, streak: 1 } }), null, kind);
+  const offline = { kind: "offline", text: "" };
+  for (const kind of ["no-gh", "no-auth", "no-repo"]) assert.equal(failureDelay({ failure: { kind, text: "" }, streak: 1 }), null, kind);
   const { first, max } = POLL.offline;
-  const delays = [1, 2, 3, 4, 5, 6, 7, 8].map((streak) => nextPollDelay({ ciKind: null, prState: null, visible: true, error: { kind: "offline", streak } }));
+  const delays = [1, 2, 3, 4, 5, 6, 7, 8].map((streak) => failureDelay({ failure: offline, streak }));
   assert.deepEqual(delays, [1, 2, 4, 8, 16, 32, 64, 128].map((x) => Math.min(first * x, max)));
   assert.equal(delays.at(-1), max);
-  const limited = (streak) => nextPollDelay({ ciKind: null, prState: null, visible: true, error: { kind: "rate-limited", streak } });
+  const limited = (streak) => failureDelay({ failure: { kind: "rate-limited", text: "" }, streak });
   assert.equal(limited(1), limited(5));
+});
+
+test("a failure of the same kind as the last one lengthens the streak; another kind starts it over", () => {
+  const offline = { kind: "offline", text: "" };
+  const twice = troubleAfter(troubleAfter(null, offline), offline);
+  assert.deepEqual(twice, { failure: offline, streak: 2 });
+  assert.equal(troubleAfter(twice, { kind: "unknown", text: "x" }).streak, 1);
+});
+
+test("a poll's wait follows the checks while the pull request is open, and stops once it is merged or closed", () => {
+  assert.deepEqual(["pending", "none", "pass", "fail"].map((kind) => nextPollDelay(kind, "OPEN")), [POLL.running, POLL["no-checks"], POLL.settled, POLL.settled]);
+  assert.equal(nextPollDelay("pending", "MERGED"), null);
+  assert.equal(nextPollDelay("pending", "CLOSED"), null);
 });
 
 test("duration", () => {
