@@ -1,14 +1,16 @@
 import { View } from "gpui-kit";
-import { ScrollHandle } from "gpui-base";
-import { appHome, checking, exec, focused, nextCommand, panes, props, readTextFile, run, settings, spaces, window as appWindow } from "herdr";
+import { InputState, ScrollHandle, VirtualListScrollHandle } from "gpui-base";
+import { appHome, checking, exec, focused, hc, nextCommand, panes, props, readTextFile, run, settings, spaces, window as appWindow } from "herdr";
 import * as fs from "fs/promises";
 import { aboutArgs, filesArgs, prArgs, stepsArgs } from "./query.js";
 import { classifyFailure, classifyRejection, firstLine, frameAnswer, mergeSteps, parseAbout, parseFiles, parseLookup, parsePin, parsePr, prLookupArgs, readAnswer } from "./github.js";
-import { failureDelay, keepSteps, nextPollDelay, offersMerge, stepsWanted, summarize, troubleAfter } from "./model.js";
+import { failureDelay, keepSteps, nextPollDelay, offersMerge, plural, stepsWanted, summarize, troubleAfter } from "./model.js";
 import { liveShown, moveSelection, paneRows, rowUrl, selectedRow } from "./view.js";
 import { coloursOf, diffOf, helperInput, noColours, plainNote } from "./diff.js";
 import { confirmMerge, mergeMethod, mergeOffer, mergePress } from "./merge.js";
-import { WIDE_PX, drawPane } from "./draw.js";
+import { EMPTY, KINDS, REVIEW_KEYS, activeAnnotation, agentOf, annotatedRows, dropAnnotation, formatQuestion, formatReview, isMove, markAsked, moveCursor, saveDraft,
+  sendResult, sortAnnotations, stepAnnotation, stretch, targetOf, toSend } from "./review.js";
+import { WIDE_PX, drawPane, lineHeight } from "./draw.js";
 
 /** @typedef {import("./github.js").Snapshot} Snapshot */
 /** @typedef {import("./github.js").About} About */
@@ -49,13 +51,16 @@ const PLACES = "pr:v1:places";
 const ABOUT_OPEN = "pr:v1:about-open";
 const FILES_OPEN = "pr:v1:files-open";
 const cacheKey = (target) => `pr:v1:${target.host}/${target.owner}/${target.name}#${target.number}`;
+const reviewKey = (target) => `pr:v1:review:${target.host}/${target.owner}/${target.name}#${target.number}`;
 const placeKey = (place) => (place === null ? null : JSON.stringify([place.machine, place.cwd, place.branch]));
 const after = (ms) => (ms === null ? null : Date.now() + ms);
 const save = (key, value) => localStorage.setItem(key, JSON.stringify(value));
 const IDLE = /** @type {MergeUi} */ ({ step: "idle" });
-const KEYS = { j: "down", down: "down", k: "up", up: "up", enter: "toggle", space: "toggle", o: "open", r: "refresh", escape: "escape", q: "close" };
+const KEYS = { j: "down", down: "down", k: "up", up: "up", enter: "toggle", space: "toggle", l: "read", right: "read", o: "open", r: "refresh", escape: "escape", q: "close" };
 /** What `herdr-app do pr.<command>` and key bindings may do. Merge is not here: it takes two presses in the pane, by someone looking at it. */
-const COMMANDS = new Set(["down", "up", "toggle", "open", "refresh", "escape", "close"]);
+const COMMANDS = new Set(["down", "up", "toggle", "read", "open", "refresh", "escape", "close"]);
+/** The same, while the keyboard is in a diff. */
+const READ_COMMANDS = new Set(Object.values(REVIEW_KEYS));
 
 export default class PullRequest extends View {
   init(_props, cx) {
@@ -89,12 +94,41 @@ export default class PullRequest extends View {
     this.folds = new Map();
     this.aboutOpen = this.saved(ABOUT_OPEN, true) === true;
     this.filesOpen = this.saved(FILES_OPEN, false) === true;
-    /** The diff last drawn, parsed once, and why it is plain when it is. @type {({ key: string, why: string | null } & ReturnType<typeof diffOf>) | null} */
+    /** The diff last drawn, parsed once, and why it is plain when it is. @type {({ key: string, path: string, why: string | null } & ReturnType<typeof diffOf>) | null} */
     this.diffed = null;
     this.expanded = false;
     this.wide = false;
     this.handle = cx.focus_handle();
     this.scroll = ScrollHandle.new();
+    /** The annotations on the pull request shown, as localStorage has them under `reviewKey`. @type {import("./review.js").Review} */
+    this.review = EMPTY;
+    this.reviewKey = null;
+    /** The keyboard's place in the diff of the file at `path`; null while it is in the list. @type {{ path: string, cursor: number, anchor: number | null } | null} */
+    this.reading = null;
+    /** The annotation being typed in the field. @type {import("./review.js").Draft | null} */
+    this.draft = null;
+    this.typing = false;
+    this.activeId = null;
+    /** A line under the diff on what the last key did or could not do. */
+    this.notice = null;
+    /** `y` was pressed: Enter sends the review. */
+    this.confirming = false;
+    /** What is on its way to the agent: the ids of questions, and "review" for the review. */
+    this.sending = new Set();
+    this.shift = false;
+    /** The diff's rows with the annotations among them, laid out once per diff and review. */
+    this.listed = null;
+    this.lines = VirtualListScrollHandle.new();
+    this.input = InputState.new({ placeholder: "" });
+    this.input.on("submit", (_e, cx) => this.submit(cx));
+    this.input.on("focus", (_e, cx) => {
+      this.typing = true;
+      cx.notify();
+    });
+    this.input.on("blur", (_e, cx) => {
+      this.typing = false;
+      cx.notify();
+    });
     if (checking()) return;
     if (replay !== null) cx.spawn(async (cx) => this.readReplay(cx, replay));
     cx.timer.every(TICK_MS, (cx) => {
@@ -104,9 +138,12 @@ export default class PullRequest extends View {
       for (;;) {
         const command = await nextCommand();
         if (command === "focus") this.handle.focus();
-        else if (COMMANDS.has(command) && focused()?.tab === this.tab) {
-          this.disarm(cx);
-          this.act(command, cx);
+        else if (focused()?.tab === this.tab) {
+          if (this.reader() !== null && READ_COMMANDS.has(command)) this.readAct(command, cx);
+          else if (COMMANDS.has(command)) {
+            this.disarm(cx);
+            this.act(command, cx);
+          }
         }
         cx.notify();
       }
@@ -149,6 +186,7 @@ export default class PullRequest extends View {
       this.folds = new Map();
       this.more = false;
       this.due = Date.now();
+      this.leave();
     }
     const lapsed = this.merge.step === "armed" && this.offer(Date.now()).look !== "armed";
     if (lapsed) this.merge = IDLE;
@@ -426,7 +464,11 @@ export default class PullRequest extends View {
     const { head, colours } = /** @type {Showing} */ (this.state).shown.files;
     const lines = colours?.byPath.get(file.path);
     const key = `${head}:${file.path}:${colours === undefined ? "plain" : "asked"}`;
-    if (this.diffed?.key !== key) this.diffed = { key, ...diffOf(file.patch, Array.isArray(lines) ? lines : null), why: null };
+    if (this.diffed?.key !== key) {
+      // One scroll position serves whichever file is drawn, so another file starts at its top.
+      if (this.diffed?.path !== file.path) this.lines.scroll_to_item(0);
+      this.diffed = { key, path: file.path, ...diffOf(file.patch, Array.isArray(lines) ? lines : null), why: null };
+    }
     this.diffed.why = plainNote(colours, file.path, this.diffed.coloured);
     return this.diffed;
   }
@@ -442,6 +484,7 @@ export default class PullRequest extends View {
   }
 
   clickRow(cx, row) {
+    this.leave();
     if (row.kind === "group") this.folds.set(row.group.key, !row.open);
     if (row.kind === "about") {
       this.aboutOpen = !row.open;
@@ -458,7 +501,19 @@ export default class PullRequest extends View {
   }
 
   key(e, cx) {
-    if (e.keystroke === "m") {
+    if (this.draft !== null) {
+      // While the field is open the keys are its own: Esc gives up what is typed, and Enter saves it. Enter in the field
+      // is the field's to report, so it is taken here only when the keyboard has left it.
+      if (e.key === "escape") this.drop();
+      else if (e.key === "enter" && !this.typing) this.submit(cx);
+      else return;
+      cx.notify();
+    } else if (this.reader() !== null) {
+      const action = REVIEW_KEYS[e.keystroke];
+      // A held key moves the cursor; it starts and sends nothing.
+      if (action === undefined || (e.is_held === true && !isMove(action))) return;
+      this.readAct(action, cx);
+    } else if (e.keystroke === "m") {
       this.pressMerge(cx, e.is_held === true);
     } else {
       this.disarm(cx);
@@ -476,6 +531,11 @@ export default class PullRequest extends View {
       this.select(moveSelection(rows, this.selected, action === "down" ? 1 : -1));
       // Each row is one child of the list, so its place in `rows` is the child to reveal.
       this.scroll.scroll_to_item(Math.max(0, rows.findIndex((r) => r.key === this.selected)));
+    } else if ((action === "toggle" || action === "read") && row?.kind === "file" && row.file.patch !== null) {
+      // A diff is opened to be read: the keyboard goes into it.
+      this.expanded = true;
+      this.reading = { path: row.file.path, cursor: 0, anchor: null };
+      this.lines.scroll_to_item(0);
     } else if (action === "toggle" && row !== null) {
       if (row.kind === "check" || row.kind === "file") this.expanded = !this.expanded;
       else this.clickRow(cx, row);
@@ -488,6 +548,272 @@ export default class PullRequest extends View {
       this.expanded = false;
     } else if (action === "close") {
       this.closePane();
+    }
+    cx.notify();
+  }
+
+  /** The keyboard's place in the diff, while the file it is in is still the one drawn. */
+  reader() {
+    return this.reading !== null && this.detailFile()?.path === this.reading.path ? this.reading : null;
+  }
+
+  /** Gives the keyboard back to the list, and gives up what is half done in the diff. */
+  leave() {
+    this.reading = null;
+    this.confirming = false;
+    this.notice = null;
+    this.activeId = null;
+    this.drop();
+  }
+
+  /** Gives up the annotation being typed. */
+  drop() {
+    if (this.draft === null) return;
+    this.draft = null;
+    this.input.set_value("");
+    this.handle.focus();
+  }
+
+  /** The annotations on the pull request shown, read from localStorage as it becomes the one shown. */
+  notes() {
+    if (this.state.phase !== "showing") return EMPTY;
+    const key = reviewKey(this.state.target);
+    if (this.reviewKey !== key) {
+      this.reviewKey = key;
+      this.review = this.saved(key, EMPTY);
+    }
+    return this.review;
+  }
+
+  /** The review saved under `key`: the one shown, unless the pane has since left that pull request. */
+  reviewAt(key) {
+    return key === this.reviewKey ? this.review : this.saved(key, EMPTY);
+  }
+
+  keep(review, key = this.reviewKey) {
+    if (key === this.reviewKey) this.review = review;
+    save(key, review);
+  }
+
+  /** A file's diff with the annotations among its lines. */
+  listing(file) {
+    const { rows } = this.diff(file);
+    const { annotations } = this.notes();
+    if (this.listed?.rows !== rows || this.listed.annotations !== annotations) {
+      this.listed = { rows, annotations, ...annotatedRows(rows, annotations, file.path, /** @type {Showing} */ (this.state).shown.files.head) };
+    }
+    return this.listed;
+  }
+
+  /** Brings the cursor's line on screen when it is off it. Every row of the list is one line high. */
+  reveal(file) {
+    const item = this.listing(file).at[this.reading.cursor];
+    const height = lineHeight(), top = this.lines.offset().y;
+    if (item * height < top || (item + 1) * height > top + this.lines.viewport_size().height) this.lines.scroll_to_item(item, "center");
+  }
+
+  /** The pull request as the agent is told of it, while a diff of it is read. @returns {import("./review.js").Subject} */
+  subject() {
+    const { target, shown } = /** @type {Showing} */ (this.state);
+    return { ref: `${target.owner}/${target.name}#${target.number}`, title: shown.snapshot.pr.title, url: shown.snapshot.pr.url, head: shown.files.head };
+  }
+
+  /** The tab's agent, which questions and the review go to. */
+  agent() {
+    return agentOf(panes().filter((p) => p.tab === this.tab), this.follow, this.machine());
+  }
+
+  /** Types `text` into the agent's terminal and submits it. @returns {Promise<"sent" | { failed: string }>} */
+  async send(text) {
+    const to = this.agent();
+    if (to.terminal === null) return { failed: to.why };
+    try {
+      return sendResult(await hc(["send", to.terminal, text]));
+    } catch (e) {
+      return { failed: firstLine(classifyRejection(e).text) };
+    }
+  }
+
+  /** What a key does while the keyboard is in a diff. */
+  readAct(action, cx) {
+    const file = this.detailFile();
+    const at = this.reading;
+    const { rows } = this.diff(file);
+    const { head } = /** @type {Showing} */ (this.state).shown.files;
+    const review = this.notes();
+    const confirming = this.confirming;
+    this.confirming = false;
+    this.notice = null;
+    // The diff under the cursor may have got shorter: the pull request can move while it is read.
+    at.cursor = Math.min(at.cursor, rows.length - 1);
+    at.anchor = at.anchor === null ? null : Math.min(at.anchor, rows.length - 1);
+    if (isMove(action)) {
+      at.cursor = moveCursor(action, at.cursor, rows.length, Math.floor(this.lines.viewport_size().height / lineHeight() / 2));
+      this.activeId = null;
+      this.reveal(file);
+    } else if (action === "range") {
+      at.anchor = at.anchor === null ? at.cursor : null;
+    } else if (action in KINDS) {
+      const { start, end } = stretch(at.cursor, at.anchor);
+      this.type(cx, { kind: action, target: targetOf(file.path, head, rows, start, end), editingId: null }, "");
+    } else if (action === "overall") {
+      this.type(cx, { kind: "comment", target: null, editingId: null }, "");
+    } else if (action === "next" || action === "previous") {
+      this.step(action === "next" ? 1 : -1);
+    } else if (action === "edit" || action === "delete") {
+      const one = activeAnnotation(review.annotations, this.activeId, file.path, head, at.cursor);
+      if (one === null) this.notice = "No annotation on this line.";
+      else if (action === "edit") this.type(cx, { kind: one.kind, target: one.target, editingId: one.id }, one.body);
+      else {
+        this.keep(dropAnnotation(review, one.id));
+        this.activeId = null;
+      }
+    } else if (action === "finish") {
+      this.finish(cx, false);
+    } else if (action === "confirm") {
+      if (this.draft !== null) this.submit(cx);
+      else if (confirming) this.finish(cx, true);
+    } else if (action === "next-file" || action === "previous-file") {
+      this.turn(action === "next-file" ? 1 : -1);
+    } else if (action === "escape") {
+      // One thing at a time is given up: the field, the question before sending, the range, then the diff.
+      if (this.draft !== null) this.drop();
+      else if (!confirming && at.anchor !== null) at.anchor = null;
+      else if (!confirming) {
+        this.leave();
+        if (!this.wide) this.expanded = false;
+      }
+    } else if (action === "close") {
+      this.closePane();
+    }
+    cx.notify();
+  }
+
+  /** Opens the field on a draft. */
+  type(cx, draft, body) {
+    this.draft = draft;
+    this.input.set_value(body);
+    cx.notify();
+    // The field is drawn by the draw this asks for, and takes the keyboard only once it is.
+    cx.timer.after(0, () => this.input.focus());
+  }
+
+  /** Enter in the field: the draft is saved, and a question goes to the agent at once. */
+  submit(cx) {
+    if (this.draft === null) return;
+    const { review, saved } = saveDraft(this.notes(), this.draft, this.input.value());
+    this.drop();
+    if (saved !== null) {
+      this.keep(review);
+      this.activeId = saved.id;
+      if (this.reading !== null) this.reading.anchor = null;
+      if (saved.kind === "question") this.askAgent(cx, saved);
+    }
+    cx.notify();
+  }
+
+  askAgent(cx, question) {
+    const key = this.reviewKey;
+    const text = formatQuestion(this.subject(), question);
+    this.sending.add(question.id);
+    cx.spawn(async (cx) => {
+      const ask = await this.send(text);
+      this.sending.delete(question.id);
+      this.keep(markAsked(this.reviewAt(key), question.id, ask), key);
+      cx.notify();
+    });
+  }
+
+  /** `y`, then Enter: the review goes to the agent, and what was sent leaves the pane. */
+  finish(cx, confirmed) {
+    const review = this.notes();
+    const count = toSend(review.annotations).length;
+    const to = this.agent();
+    if (count === 0) this.notice = review.annotations.length === 0 ? "Nothing to send yet: c, s or i notes the line." : "Nothing to send: the questions went as they were asked.";
+    else if (to.terminal === null) this.notice = to.why;
+    else if (this.sending.has("review")) this.notice = "The review is on its way.";
+    else if (!confirmed) this.confirming = true;
+    else {
+      const key = this.reviewKey;
+      const gone = new Set(review.annotations.map((one) => one.id));
+      const text = formatReview(this.subject(), review.annotations, this.paths());
+      this.sending.add("review");
+      cx.spawn(async (cx) => {
+        const sent = await this.send(text);
+        this.sending.delete("review");
+        if (sent === "sent") {
+          const now = this.reviewAt(key);
+          this.keep({ ...now, annotations: now.annotations.filter((one) => !gone.has(one.id)) }, key);
+          this.notice = `Sent ${plural(count, "annotation")} to ${to.name}.`;
+        } else {
+          this.notice = `Not sent, and kept here: ${sent.failed}`;
+        }
+        cx.notify();
+      });
+    }
+  }
+
+  /** The files' paths in GitHub's order, which the annotations are sorted by. */
+  paths() {
+    return (/** @type {Showing} */ (this.state).shown.files?.list ?? []).map((file) => file.path);
+  }
+
+  /** Puts the keyboard in another file's diff, at `cursor`, when that file is in the list. */
+  openDiff(path, cursor) {
+    const row = this.rows().find((r) => r.kind === "file" && r.file.path === path && r.file.patch !== null);
+    if (row === undefined) return false;
+    this.select(row.key);
+    this.reading = { path, cursor, anchor: null };
+    // Reading the diff here starts it at its top; the cursor is then brought on screen.
+    this.diff(row.file);
+    this.lines.scroll_to_item(Math.max(0, this.listing(row.file).at[cursor] - 3));
+    return true;
+  }
+
+  /** `h` and `l`: the annotation before or after the active one, in whichever file it is. */
+  step(delta) {
+    const ordered = sortAnnotations(this.notes().annotations, this.paths());
+    if (ordered.length === 0) return void (this.notice = "No annotations yet.");
+    const { target, id } = stepAnnotation(ordered, this.activeId, delta);
+    const { head } = /** @type {Showing} */ (this.state).shown.files;
+    this.activeId = id;
+    if (target === null) return;
+    const cursor = target.head === head ? target.start : 0;
+    if (target.path !== this.reading.path) {
+      if (!this.openDiff(target.path, cursor)) this.notice = `${target.path} is not among the files listed.`;
+      return;
+    }
+    this.reading.cursor = Math.min(cursor, this.diff(this.detailFile()).rows.length - 1);
+    this.reading.anchor = null;
+    this.reveal(this.detailFile());
+  }
+
+  /** `n` and `p`: the next or previous file that has a diff. */
+  turn(delta) {
+    const files = this.rows().filter((r) => r.kind === "file" && r.file.patch !== null);
+    const next = files[files.findIndex((r) => r.file.path === this.reading.path) + delta];
+    if (next === undefined) this.notice = delta > 0 ? "This is the last file." : "This is the first file.";
+    else this.openDiff(next.file.path, 0);
+    this.activeId = null;
+  }
+
+  /**
+   * A click in the diff. On a line it puts the cursor there, and with Shift held makes it the end of a range from where
+   * the cursor was; on an annotation it makes that the one `r` and `x` act on. `key` is the row's place in the list.
+   */
+  clickLine(cx, file, key) {
+    const item = this.listing(file).items[Number(key)];
+    if (item === undefined) return;
+    const was = this.reader();
+    this.confirming = false;
+    this.notice = null;
+    this.expanded = true;
+    if (item.type === "annotation") {
+      this.reading = was ?? { path: file.path, cursor: 0, anchor: null };
+      this.activeId = item.annotation.id;
+    } else {
+      this.reading = { path: file.path, cursor: item.index, anchor: this.shift && was !== null ? was.anchor ?? was.cursor : null };
+      this.activeId = null;
     }
     cx.notify();
   }

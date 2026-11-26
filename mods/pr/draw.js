@@ -1,8 +1,9 @@
 import { div } from "gpui-kit";
-import { Scrollbar, TextView, h_flex, v_flex, v_virtual_list } from "gpui-base";
+import { Input, Scrollbar, TextView, h_flex, v_flex, v_virtual_list } from "gpui-base";
 import { settings, theme } from "herdr";
 import { ROLES, cutSpans, rowNumber } from "./diff.js";
 import { duration, hasSteps, plural, summarize } from "./model.js";
+import { KINDS, activeAnnotation, askWords, countByPath, stretch, toSend } from "./review.js";
 import { aboutLine, ago, blockerWords, currentStep, failureLines, headlineOf, liveShown, reviewerWords, selectedRow, stepLink } from "./view.js";
 
 export const WIDE_PX = 720;
@@ -57,6 +58,9 @@ export function drawPane(app, now) {
   return v_flex().id("pr").track_focus(app.handle).size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
     .on_size_change((size, cx) => app.resized(size, cx))
     .on_key_down((e, cx) => app.key(e, cx))
+    .on_modifiers_changed((e) => {
+      app.shift = e.modifiers.shift;
+    })
     .on_mouse_down("left", (_e, cx) => app.pressed(cx))
     .child("shown" in s && s.shown !== null ? snapshotView(app, t, s, now) : PLACEHOLDERS[s.phase](app, t, s, now));
 }
@@ -73,10 +77,11 @@ function snapshotView(app, t, s, now) {
   const file = app.detailFile();
   const pane = v_flex().size_full().min_h(0).child(header(app, t, s, sum, now));
   // A diff wants the pane's width: in a narrow pane it stands in place of the list until Esc.
-  if (!app.wide && file !== null) return pane.child(diffPane(app, t, file, "Esc for the list"));
+  if (!app.wide && file !== null) return pane.child(diffPane(app, t, file));
+  const noted = countByPath(app.notes().annotations);
   // Each row is one child of the list, whatever opens under it, so a row's place in `rows` is the child scroll_to_item reveals.
   const items = rows.map((row) => {
-    const drawn = rowView(app, t, row, row === selected, clock);
+    const drawn = rowView(app, t, row, row === selected, clock, noted);
     const under = row.kind === "about" && row.open ? aboutBlock(t, s, now)
       : row.kind === "files" && row.open && s.shown.files === null ? filesNote(t, s)
       : !app.wide && app.expanded && row === selected && check !== null
@@ -87,7 +92,7 @@ function snapshotView(app, t, s, now) {
   const list = v_flex().id("checks").min_w(0).min_h(0).py(4).overflow_y_scrollbar().track_scroll(app.scroll)
     .children(rows.some((r) => CHECK_ROWS.includes(r.kind)) ? items : [...items, line("No checks reported for this commit.", t.muted).px(14).py(8)]);
   if (!app.wide || !rows.some((r) => CHECK_ROWS.includes(r.kind) || r.kind === "file")) return pane.child(list.flex_1());
-  const side = file !== null ? div().flex_1().min_w(0).h_full().border_l_1().border_color(t.border).child(diffPane(app, t, file, null))
+  const side = file !== null ? div().flex_1().min_w(0).h_full().border_l_1().border_color(t.border).child(diffPane(app, t, file))
     : v_flex().id("details").flex_1().min_w(0).h_full().border_l_1().border_color(t.border).overflow_y_scrollbar()
       .child(check !== null ? details(t, check, s, clock) : line("Select a check to see its steps, or a file to see its diff.", t.dim).p(12));
   // Beside a diff the list gives up width: the diff is what is being read.
@@ -149,7 +154,7 @@ function mergeRow(app, t, now) {
   return row(mergeButton(app, t, offer.label, offer.look), ...note);
 }
 
-function rowView(app, t, row, selected, now) {
+function rowView(app, t, row, selected, now, noted) {
   const base = h_flex().id(row.key).h(26).flex_none().pr(14).gap(8).items_center().cursor_pointer()
     .when(selected, (el) => el.bg(t.selected)).hover((x) => x.bg(t.hover))
     .on_click((_e, cx) => app.clickRow(cx, row));
@@ -169,6 +174,7 @@ function rowView(app, t, row, selected, now) {
       .child(h_flex().flex_1().min_w(0).text_size(12.5)
         .child(div().min_w(0).truncate().text_color(t.dim).child(file.path.slice(0, at)))
         .child(div().flex_none().max_w_full().truncate().text_color(t.foreground).child(file.path.slice(at))))
+      .children(noted.has(file.path) ? [div().flex_none().text_size(11).text_color(t.ansi3).child(plural(noted.get(file.path), "note"))] : [])
       .children(fileCounts(t, file));
   }
   if (row.kind === "hidden") {
@@ -204,41 +210,108 @@ const DIFF_INK = { add: "18", del: "18", changed: "40" };
 const ROLE_INK = { plain: "foreground", comment: "dim", string: "ansi2", constant: "ansi3", keyword: "ansi5", function: "ansi4", type: "ansi6", punctuation: "muted" };
 const roleInks = (t) => ROLES.map((role) => t[ROLE_INK[role]]);
 
-/** One file's diff, filling the space it is given. `hint` is a word on how to leave, where there is a way. */
-function diffPane(app, t, file, hint) {
+/** The height of one row of a diff, which the cursor is moved and revealed by. */
+export const lineHeight = () => Math.ceil((settings().font_size ?? 13) * 1.8);
+/** A comment takes no side, so it has no colour: blue, the palette's fourth, is too dark to read on some terminals' black. */
+const KIND_INK = { issue: "ansi1", suggestion: "ansi2", question: "ansi3", comment: "muted" };
+const HINTS = ["v range", "c comment", "s suggestion", "i issue", "a ask", "o on the whole", "h l between them", "n p files"];
+
+/** One file's diff, filling the space it is given, with what is noted on it among its lines and the review's bar under it. */
+function diffPane(app, t, file) {
+  const reading = app.reader();
+  const hint = reading !== null ? "Esc for the list" : app.wide ? "Enter to annotate" : "Enter to annotate · Esc for the list";
   const top = h_flex().flex_none().h(30).px(12).gap(8).items_center().border_b_1().border_color(t.border)
     .child(fileMark(t, file))
     .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(file.previous === null ? file.path : `${file.previous} → ${file.path}`))
     .children(fileCounts(t, file))
-    .children(hint === null ? [] : [div().flex_none().text_size(11).text_color(t.dim).child(hint)]);
+    .children(file.patch === null ? [] : [div().flex_none().text_size(11).text_color(t.dim).child(hint)]);
   const pane = v_flex().size_full().min_h(0).child(top);
   if (file.patch === null) {
     return pane.child(line(file.additions + file.deletions > 0 ? "GitHub gives no diff for this file: it is too large. Press o to open the pull request's files."
       : "No text diff: a binary file, or one that only moved.", t.muted).p(12));
   }
-  const { rows, columns, digits, why } = app.diff(file);
+  const { columns, digits, why } = app.diff(file);
+  const { items } = app.listing(file);
   const inks = roleInks(t);
+  const picked = reading === null ? null : stretch(reading.cursor, reading.anchor);
   /** A line's text: in its colours once the helper has read the file, plain until then. The part of a changed line that differs is marked. */
   const text = (row) => (row.spans === undefined ? div().flex_1().min_w(0).truncate().child(row.text.slice(0, DIFF_COLUMNS) || " ")
     : h_flex().flex_1().min_w(0).overflow_hidden().children(cutSpans(row.spans, DIFF_COLUMNS).map(([role, part, changed]) =>
       div().flex_none().text_color(inks[role]).when(changed === 1, (el) => el.bg((row.kind === "add" ? t.ansi2 : t.ansi1) + DIFF_INK.changed)).child(part))));
   const noted = why === null ? pane : pane.child(line(why, t.dim).flex_none().px(12).py(4).truncate().border_b_1().border_color(t.border));
   const size = settings().font_size ?? 13;
-  const height = Math.ceil(size * 1.8), char = size * 0.64, gutter = Math.ceil(digits * char) + 2;
+  const height = lineHeight(), char = size * 0.64, gutter = Math.ceil(digits * char) + 2;
   const id = `diff:${file.path}`;
-  const draw = (row) => {
-    if (row.kind === "hunk" || row.kind === "note") return div().w_full().h(height).flex_none().px(12).truncate().bg(t.raised).text_color(t.dim).child(row.text);
+  const draw = (item) => {
+    if (item.type === "annotation") {
+      const { annotation: one, moved } = item;
+      const asked = askWords(one, app.sending);
+      return h_flex().w_full().h(height).flex_none().pl(gutter + 6 + 2 * char + 10).pr(12).gap(8).items_center()
+        .bg(one.id === app.activeId ? t.selected : t.raised)
+        .child(div().flex_none().text_color(t[KIND_INK[one.kind]]).child(`${KINDS[one.kind].glyph} ${KINDS[one.kind].label}`))
+        // What there is to say of it stands before its words: the row is as wide as the longest line, and its end may be off screen.
+        .children([moved ? `${one.target.where} at an earlier commit` : null, asked].filter((x) => x !== null).map((words) => div().flex_none().text_color(t.dim).child(words)))
+        .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(one.body));
+    }
+    const { row, index, mark } = item;
+    const on = picked !== null && index >= picked.start && index <= picked.end;
+    const at = reading !== null && index === reading.cursor;
+    // The cursor and its range are a strip at the row's edge as well as a ground: a theme's `selected` may be its background.
+    const marked = h_flex().h_full().flex_none()
+      .child(div().w(3).h_full().flex_none().when(on, (el) => el.bg(at ? t.foreground : t.dim)))
+      .child(div().w(char).ml(3).flex_none().text_color(mark === null ? t.dim : t[KIND_INK[mark]]).child(mark === null ? "" : KINDS[mark].glyph));
+    if (row.kind === "hunk" || row.kind === "note") {
+      return h_flex().w_full().h(height).flex_none().items_center().bg(on ? t.selected : t.raised).text_color(at ? t.foreground : t.dim)
+        .child(marked).child(div().flex_1().min_w(0).pl(6).pr(12).truncate().child(row.text));
+    }
     return h_flex().w_full().h(height).flex_none().gap(10).items_center()
       .when(row.kind === "add", (el) => el.bg(t.ansi2 + DIFF_INK.add)).when(row.kind === "del", (el) => el.bg(t.ansi1 + DIFF_INK.del))
-      .child(div().w(gutter).ml(6).flex_none().text_right().text_color(t.dim).child(String(rowNumber(row))))
+      .when(on, (el) => el.bg(t.selected))
+      .child(h_flex().flex_none().child(marked).child(div().w(gutter).flex_none().text_right().text_color(at ? t.foreground : t.dim).child(String(rowNumber(row)))))
       .child(div().w(char).flex_none().text_color(row.kind === "add" ? t.ansi2 : row.kind === "del" ? t.ansi1 : t.dim).child(row.kind === "add" ? "+" : row.kind === "del" ? "−" : ""))
       .child(text(row));
   };
   return noted.child(div().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(size)
     .child(div().id(`${id}:x`).size_full().overflow_x_scrollbar()
-      .child(div().w_full().min_w(Math.max(300, Math.min(columns, DIFF_COLUMNS) * char + gutter + 6 + char + 40)).h_full()
-        .child(v_virtual_list(id, rows.length, height, (i) => String(i), (range) => rows.slice(range.start, range.end).map(draw)).size_full())))
-    .child(Scrollbar.vertical(id).viewport_from_layout().absolute().inset_0()));
+      .child(div().w_full().min_w(Math.max(300, Math.min(columns, DIFF_COLUMNS) * char + gutter + 6 + 2 * char + 40)).h_full()
+        .child(v_virtual_list(id, items.length, height, (i) => String(i), (range) => items.slice(range.start, range.end).map(draw)).size_full()
+          .track_scroll(app.lines).on_item_click((key, cx) => app.clickLine(cx, file, key)))))
+    .child(Scrollbar.vertical(id).viewport_from_layout().absolute().inset_0()))
+    .children(reviewBar(app, t, file, reading));
+}
+
+/**
+ * What stands under a diff while it is read: the field an annotation is typed in, the question before the review is
+ * sent, what the last key did, the annotation the cursor is on in full, else the keys.
+ */
+function reviewBar(app, t, file, reading) {
+  const { annotations } = app.notes();
+  if (reading === null && app.draft === null && app.activeId === null && app.notice === null && !app.sending.has("review")) return [];
+  const bar = (...children) => [v_flex().flex_none().px(12).py(7).gap(5).border_t_1().border_color(t.border).children(children)];
+  const tag = (kind, target, extra) => h_flex().gap(8).items_center()
+    .child(div().flex_none().text_size(12).font_semibold().text_color(t[KIND_INK[kind]]).child(`${KINDS[kind].glyph} ${KINDS[kind].label}`))
+    .child(line([target === null ? "the whole pull request" : target.where, extra].filter((x) => x !== null).join(" · "), t.dim).min_w(0).truncate());
+  const to = app.agent();
+  if (app.draft !== null) {
+    const { kind, target } = app.draft;
+    const enter = kind !== "question" ? "Enter keeps it, Esc gives it up" : to.terminal === null ? to.why : `Enter asks ${to.name}, Esc gives it up`;
+    return bar(tag(kind, target, enter),
+      div().id("annotation").h(30).px(8).flex().items_center().rounded(6).border_1().border_color(app.typing ? t.accent : t.input).cursor_text()
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .child(Input.new(app.input).h_full().text_size(12.5).text_color(t.foreground)));
+  }
+  const count = toSend(annotations).length;
+  if (app.confirming) return bar(line(`Send ${plural(count, "annotation")} to ${to.terminal === null ? "the agent" : to.name}? Enter sends them, Esc keeps them here.`, t.foreground));
+  if (app.sending.has("review")) return bar(line("Sending the review…", t.muted));
+  if (app.notice !== null) return bar(line(app.notice, t.muted));
+  const head = app.state.shown.files.head;
+  const one = activeAnnotation(annotations, app.activeId, file.path, head, reading?.cursor ?? -1);
+  if (one !== null) {
+    return bar(tag(one.kind, one.target, askWords(one, app.sending)),
+      div().text_size(12.5).text_color(t.foreground).child(one.body),
+      line("r to change it · x to delete it", t.dim));
+  }
+  return bar(line([...count > 0 ? [`${plural(count, "annotation")}: y sends ${count === 1 ? "it" : "them"}`] : [], ...HINTS].join(" · "), t.dim).truncate());
 }
 
 function aboutBlock(t, s, now) {
