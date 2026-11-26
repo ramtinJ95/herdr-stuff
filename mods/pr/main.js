@@ -2,7 +2,7 @@ import { View } from "gpui-kit";
 import { ScrollHandle } from "gpui-base";
 import { checking, exec, focused, nextCommand, panes, props, readTextFile, run, settings, spaces, window as appWindow } from "herdr";
 import { aboutArgs, prArgs, stepsArgs } from "./query.js";
-import { classifyFailure, classifyRejection, firstLine, frameAnswer, mergeSteps, parseAbout, parseLookup, parsePr, prLookupArgs, readAnswer } from "./github.js";
+import { classifyFailure, classifyRejection, firstLine, frameAnswer, mergeSteps, parseAbout, parseLookup, parsePin, parsePr, prLookupArgs, readAnswer } from "./github.js";
 import { failureDelay, keepSteps, nextPollDelay, offersMerge, stepsWanted, summarize, troubleAfter } from "./model.js";
 import { liveShown, moveSelection, paneRows, rowUrl, selectedRow } from "./view.js";
 import { confirmMerge, mergeMethod, mergeOffer, mergePress } from "./merge.js";
@@ -14,7 +14,7 @@ import { WIDE_PX, drawPane } from "./draw.js";
 /** @typedef {import("./model.js").Trouble} Trouble */
 /** @typedef {import("./merge.js").MergeMethod} MergeMethod */
 /** @typedef {import("./merge.js").MergeUi} MergeUi */
-/** @typedef {{ cwd: string, branch: string | null, machine: string | null }} Place */
+/** Where gh runs. A pinned pane has no folder or branch: `pin` names the pull request it was given. @typedef {{ cwd: string | null, branch: string | null, machine: string | null, pin: string | null }} Place */
 /** What is drawn of a pull request: the poll's snapshot and the description read apart from it. @typedef {{ snapshot: Snapshot, about: About | null, fetchedAt: number, source: "cache" | "live" | "replay" }} Shown */
 /**
  * `method` is undefined until GitHub has answered with the repository's merge methods.
@@ -27,7 +27,8 @@ import { WIDE_PX, drawPane } from "./draw.js";
  *   | { phase: "failed", place: Place, trouble: Trouble }
  *   | { phase: "no-pr", place: Place }
  *   | Showing
- *   | { phase: "replay", file: string, shown: Shown | null, trouble: Trouble | null }} State
+ *   | { phase: "replay", file: string, shown: Shown | null, trouble: Trouble | null }
+ *   | { phase: "bad-pin", text: string }} State
  */
 
 const TICK_MS = 1_000;
@@ -52,9 +53,18 @@ export default class PullRequest extends View {
     // Set by the first draw: a pane is drawn only while its tab is the one shown, and init also runs for a pane in another tab.
     /** @type {string | null} */
     this.tab = null;
-    const replay = props()?.replay ?? null;
+    const { replay = null, pr = null } = props() ?? {};
     /** @type {State} */
     this.state = replay === null ? { phase: "idle" } : { phase: "replay", file: replay, shown: null, trouble: null };
+    /** The pull request this pane was given to show, in place of the one its tab is on. @type {Target | null} */
+    this.pin = null;
+    if (pr !== null && replay === null) {
+      try {
+        this.pin = parsePin(pr);
+      } catch (e) {
+        this.state = { phase: "bad-pin", text: classifyRejection(e).text };
+      }
+    }
     /** @type {MergeUi} */
     this.merge = IDLE;
     this.follow = null;
@@ -96,17 +106,32 @@ export default class PullRequest extends View {
     const pane = mine.find((p) => p.focused) ?? mine.find((p) => p.pane === this.follow) ?? mine[0];
     if (!pane?.cwd) return null;
     this.follow = pane.pane;
-    const machine = spaces().find((s) => s.tabs.some((tab) => tab.id === this.tab))?.machine ?? null;
-    return { cwd: pane.cwd, branch: pane.branch, machine };
+    return { cwd: pane.cwd, branch: pane.branch, machine: this.machine(), pin: null };
+  }
+
+  /** The machine the tab's space lives on, where gh runs. */
+  machine() {
+    return spaces().find((s) => s.tabs.some((tab) => tab.id === this.tab))?.machine ?? null;
+  }
+
+  /** @returns {Place} */
+  pinned() {
+    const { owner, name, number } = this.pin;
+    return { cwd: null, branch: null, machine: this.machine(), pin: `${owner}/${name}#${number}` };
+  }
+
+  /** @returns {Showing} */
+  opening(place, target) {
+    return { phase: "showing", place, target, localHead: null, method: undefined, shown: this.cached(target), trouble: null, stepsError: null, aboutError: null };
   }
 
   track(cx) {
-    if (this.tab === null || this.state.phase === "replay") return false;
-    const place = this.followed();
+    if (this.tab === null || this.state.phase === "replay" || this.state.phase === "bad-pin") return false;
+    const place = this.pin === null ? this.followed() : this.pinned();
     const moved = placeKey(place) !== placeKey("place" in this.state ? this.state.place : null);
     if (moved) {
       this.gen++;
-      this.state = place === null ? { phase: "idle" } : { phase: "locating", place, shown: this.guess(place) };
+      this.state = place === null ? { phase: "idle" } : this.pin === null ? { phase: "locating", place, shown: this.guess(place) } : this.opening(place, this.pin);
       this.merge = IDLE;
       this.selected = null;
       this.folds = new Map();
@@ -127,7 +152,7 @@ export default class PullRequest extends View {
   /** Runs the one thing there is to do, if nothing is running; whatever it was, it looks again when done. */
   pump(cx) {
     const s = this.state;
-    if (checking() || s.phase === "idle" || s.phase === "replay") return;
+    if (checking() || s.phase === "idle" || s.phase === "replay" || s.phase === "bad-pin") return;
     const shown = this.onScreen(s.phase);
     if (shown && !this.wasShown && this.due === null) this.due = Date.now();
     this.wasShown = shown;
@@ -168,7 +193,7 @@ export default class PullRequest extends View {
 
   async gh(argv, place) {
     try {
-      const r = await exec("gh", argv, { cwd: place.cwd, on: place.machine, timeout: GH_TIMEOUT_MS });
+      const r = await exec("gh", argv, { cwd: place.cwd ?? undefined, on: place.machine, timeout: GH_TIMEOUT_MS });
       return { ...r, failure: r.code === 0 ? null : classifyFailure(r) };
     } catch (e) {
       return { code: -1, stdout: "", stderr: "", failure: classifyRejection(e) };
@@ -181,6 +206,7 @@ export default class PullRequest extends View {
   }
 
   async head(place) {
+    if (place.cwd === null) return null;
     try {
       const r = await exec("git", ["rev-parse", "HEAD"], { cwd: place.cwd, on: place.machine });
       return r.code === 0 ? r.stdout.trim() : null;
@@ -200,7 +226,7 @@ export default class PullRequest extends View {
     }
     const target = found.value;
     this.remember(place, target);
-    this.state = { phase: "showing", place, target, localHead: null, method: undefined, shown: this.cached(target), trouble: null, stepsError: null, aboutError: null };
+    this.state = this.opening(place, target);
     cx.notify();
     await this.poll(cx, gen);
   }
@@ -221,7 +247,7 @@ export default class PullRequest extends View {
     const s = this.showing(gen);
     if (s === null) return;
     if (list.failure !== null) {
-      if (list.failure.kind === "no-pr") {
+      if (list.failure.kind === "no-pr" && place.pin === null) {
         this.state = { phase: "locating", place, shown: null };
         this.due = Date.now();
         return cx.notify();

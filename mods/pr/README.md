@@ -25,6 +25,14 @@ The pane follows its tab. It shows the pull request of the terminal you focused 
 
 With no pull request for the branch, it says so and looks again every 30 seconds.
 
+A pane can be pinned to one pull request instead, in any repository `gh` can see: open it with the prop `pr`, as `owner/name#number` or the pull request's URL.
+
+```sh
+herdr-app do pane.split --direction right --mod pr --props '{"pr":"cli/cli#9000"}'
+```
+
+A pinned pane does not follow its tab, names its repository in the header beside "pinned", and has no line about your checkout. Merge works in it as in any other.
+
 ## Keys in the pane
 
 | Key | Does |

@@ -29,11 +29,12 @@ function notice(t, tone, look, headline, lines) {
     .children(lines.filter((l) => l !== null).map(([text, color]) => line(text, color).pl(17)));
 }
 
-const where = (t, place) => [`${place.branch ?? "no branch"} · ${folder(place.cwd)}${place.machine === null ? "" : ` on ${place.machine}`}`, t.dim];
+const where = (t, place) => [`${place.pin ?? `${place.branch ?? "no branch"} · ${folder(place.cwd)}`}${place.machine === null ? "" : ` on ${place.machine}`}`, t.dim];
 
 function failed(app, t, failure, now, place) {
-  const { headline, tone, fix } = failureLines(failure, app.resetAt, now);
-  return notice(t, tone, "still", headline, [fix === null ? null : [fix, t.muted], where(t, place)]);
+  const { headline, tone, fix } = failureLines(failure, app.resetAt, now, place.pin);
+  const named = place.pin !== null && headline.includes(place.pin);
+  return notice(t, tone, "still", headline, [fix === null ? null : [fix, t.muted], named ? null : where(t, place)]);
 }
 
 /** What stands in the pane while there is no pull request to draw. */
@@ -46,6 +47,7 @@ const PLACEHOLDERS = {
     : notice(t, "idle", "pulse", `Reading #${s.target.number}`, [where(t, s.place)])),
   replay: (_app, t, s) => (s.trouble !== null ? notice(t, "blocked", "still", "The replay frame did not load", [[s.trouble.failure.text, t.muted], [s.file, t.dim]])
     : notice(t, "idle", "pulse", "Reading the replay frame", [[s.file, t.dim]])),
+  "bad-pin": (_app, t, s) => notice(t, "blocked", "still", "This pane was given a pull request it cannot read", [[s.text, t.muted]]),
 };
 
 export function drawPane(app, now) {
@@ -93,6 +95,8 @@ function header(app, t, s, sum, now) {
   const look = !live && source !== "replay" ? "faded" : sum.ci.kind === "pending" ? "pulse" : "still";
   const age = source === "replay" ? `replay, recorded ${ago(fetchedAt, now)}` : live ? null : `as of ${ago(fetchedAt, now)}`;
   const blockers = blockerWords(sum);
+  const pin = s.phase === "showing" ? s.place.pin : null;
+  const repo = pin === null ? "" : `${s.target.owner}/${s.target.name}, pinned · `;
   const fine = (text) => div().pl(17).truncate().text_size(11.5).text_color(t.dim).child(text);
   return v_flex().flex_none().px(14).pt(10).pb(10).gap(3).border_b_1().border_color(t.border)
     .child(h_flex().gap(8).items_center()
@@ -103,10 +107,10 @@ function header(app, t, s, sum, now) {
       .when(age !== null, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(age))))
     .child(div().pl(17).text_size(13).text_color(live || source === "replay" ? t.foreground : t.muted).child(headlineOf(sum)))
     .when(blockers.length > 0, (el) => el.child(line(blockers.join(" · "), t.muted).pl(17)))
-    .child(fine(`${pr.headRef} → ${pr.baseRef} · ${short(pr.head)} · +${pr.additions} −${pr.deletions} · ${plural(pr.files, "file")}`))
+    .child(fine(`${repo}${pr.headRef} → ${pr.baseRef} · ${short(pr.head)} · +${pr.additions} −${pr.deletions} · ${plural(pr.files, "file")}`))
     .when(sum.stale, (el) => el.child(line(`Your checkout is at ${short(s.localHead)}, not ${short(pr.head)}, the commit CI ran.`, t.muted).pl(17)))
     .when(trouble !== null, (el) => {
-      const { headline, fix } = failureLines(trouble.failure, app.resetAt, now);
+      const { headline, fix } = failureLines(trouble.failure, app.resetAt, now, pin);
       return el.child(line(fix === null ? headline : `${headline}. ${fix}`, t.muted).pl(17));
     })
     .children(mergeRow(app, t, now));

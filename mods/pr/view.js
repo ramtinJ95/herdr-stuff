@@ -86,8 +86,13 @@ const FIXES = {
   offline: "The pane tries again by itself.",
 };
 
-export function failureLines(failure, resetAt, now) {
-  const { headline, tone } = describeFailure(failure);
+/** What a pinned pane says in place of the lines about "this branch". */
+const PINNED = { "no-pr": (pin) => `No pull request ${pin}`, "no-repo": (pin) => `gh cannot see the repository of ${pin}` };
+
+/** `pin` names the pull request a pinned pane was given, null for a pane that follows its tab. */
+export function failureLines(failure, resetAt, now, pin = null) {
+  const { tone } = describeFailure(failure);
+  const headline = pin !== null && PINNED[failure.kind] !== undefined ? PINNED[failure.kind](pin) : describeFailure(failure).headline;
   if (failure.kind === "rate-limited") {
     return { headline, tone, fix: resetAt !== null && resetAt > now ? `It resets at ${clock(resetAt)}.` : `The pane tries again in ${POLL["rate-limited"] / 60_000} minutes.` };
   }

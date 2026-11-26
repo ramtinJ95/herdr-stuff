@@ -204,6 +204,9 @@ export function mergeSteps(snapshot, raw) {
   return { ...snapshot, checks: snapshot.checks.map((c) => (found.has(c.id) ? { ...c, steps: found.get(c.id) } : c)) };
 }
 
+const PR_URL = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#].*)?$/;
+const targetOf = (m) => ({ host: m[1], owner: m[2], name: m[3], number: Number(m[4]) });
+
 /** gh's own lookup of the pull request for the branch checked out in the folder it runs in. */
 export function prLookupArgs() {
   return ["pr", "view", "--json", "number,url,state,headRefName,headRefOid"];
@@ -217,9 +220,23 @@ export function parseLookup(stdout) {
   } catch {
     throw new GhError("unknown", `gh pr view printed something other than JSON: ${stdout.slice(0, 200)}`);
   }
-  const m = typeof url === "string" ? /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/pull\/(\d+)$/.exec(url) : null;
+  const m = typeof url === "string" ? PR_URL.exec(url) : null;
   if (m === null) throw new GhError("unknown", `gh pr view gave no pull request URL: ${stdout.slice(0, 200)}`);
-  return { host: m[1], owner: m[2], name: m[3], number: Number(m[4]) };
+  return targetOf(m);
+}
+
+/**
+ * Where the pull request a person named lives: `owner/name#12` on github.com, or its URL on any host, with or without
+ * a page under it. Throws a GhError when it is neither.
+ * @returns {Target}
+ */
+export function parsePin(text) {
+  const named = typeof text === "string" ? text.trim() : "";
+  const short = /^([\w.-]+)\/([\w.-]+)#(\d+)$/.exec(named);
+  if (short !== null) return { host: "github.com", owner: short[1], name: short[2], number: Number(short[3]) };
+  const url = PR_URL.exec(named);
+  if (url === null) throw new GhError("unknown", `${JSON.stringify(text)} is not owner/name#number or a pull request's URL`);
+  return targetOf(url);
 }
 
 /** What gh's stderr says went wrong, first match wins. The README lists which texts were seen from a real gh. */
