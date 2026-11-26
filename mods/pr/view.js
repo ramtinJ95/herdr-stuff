@@ -6,10 +6,17 @@ import { POLL, describeFailure, groups, plural } from "./model.js";
 /** @typedef {import("./github.js").Failure} Failure */
 /** @typedef {ReturnType<typeof import("./model.js").summarize>} Summary */
 /** @typedef {ReturnType<typeof groups>[number]} Group */
-/** @typedef {{ kind: "group", key: string, group: Group, open: boolean } | { kind: "check", key: string, check: Check } | { kind: "hidden", key: string, count: number } | { kind: "about", key: "about", open: boolean }} Row */
+/** @typedef {import("./github.js").File} File */
+/**
+ * @typedef {{ kind: "group", key: string, group: Group, open: boolean } | { kind: "check", key: string, check: Check } | { kind: "hidden", key: string, count: number }
+ *   | { kind: "about", key: "about", open: boolean } | { kind: "files", key: "files", open: boolean, count: number }
+ *   | { kind: "file", key: string, file: File } | { kind: "more-files", key: "more-files", count: number }} Row
+ */
 /** @typedef {import("./github.js").About} About */
 
 const PASSED_SHOWN = 8;
+/** The list is drawn whole, so a pull request with more files than this shows the first and counts the rest. */
+export const FILES_SHOWN = 300;
 
 function opensByDefault(group, all) {
   if (group.key === "skipping") return false;
@@ -28,17 +35,36 @@ export function rowsOf(snapshot, folds) {
   return snapshot.hidden > 0 ? [...rows, { kind: "hidden", key: "hidden", count: snapshot.hidden }] : rows;
 }
 
-/** The pane's rows: the description, then the checks. */
-export const paneRows = (snapshot, folds, aboutOpen) => /** @type {Row[]} */ ([{ kind: "about", key: "about", open: aboutOpen }, ...rowsOf(snapshot, folds)]);
+/**
+ * The pane's rows: the description, the files, then the checks. `files` is null until GitHub has listed them.
+ * @param {Snapshot} snapshot
+ * @param {{ folds: Map<string, boolean>, aboutOpen: boolean, filesOpen: boolean, files: File[] | null }} open
+ * @returns {Row[]}
+ */
+export function paneRows(snapshot, { folds, aboutOpen, filesOpen, files }) {
+  const listed = filesOpen && files !== null ? files : [];
+  return [
+    { kind: "about", key: "about", open: aboutOpen },
+    { kind: "files", key: "files", open: filesOpen, count: snapshot.pr.files },
+    ...listed.slice(0, FILES_SHOWN).map((file) => /** @type {Row} */ ({ kind: "file", key: `file:${file.path}`, file })),
+    .../** @type {Row[]} */ (listed.length > FILES_SHOWN ? [{ kind: "more-files", key: "more-files", count: listed.length - FILES_SHOWN }] : []),
+    ...rowsOf(snapshot, folds),
+  ];
+}
 
-/** Where `o` goes from a row: the check's own page, the pull request from its description, else the pull request's checks. */
-export const rowUrl = (row, snapshot) =>
-  (row.kind === "check" && row.check.link !== null ? row.check.link : row.kind === "about" ? snapshot.pr.url : `${snapshot.pr.url}/checks`);
+const FILE_ROWS = ["files", "file", "more-files"];
+
+/** Where `o` goes from a row: the check's own page, the pull request from its description, its files from a file, else its checks. */
+export function rowUrl(row, snapshot) {
+  if (row.kind === "check" && row.check.link !== null) return row.check.link;
+  if (row.kind === "about") return snapshot.pr.url;
+  return `${snapshot.pr.url}/${FILE_ROWS.includes(row.kind) ? "files" : "checks"}`;
+}
 
 function indexOf(rows, key) {
   const own = rows.findIndex((r) => r.key === key);
   if (own >= 0) return own;
-  const folded = rows.findIndex((r) => r.kind === "group" && r.group.checks.some((c) => c.id === key));
+  const folded = rows.findIndex((r) => (r.kind === "group" && r.group.checks.some((c) => c.id === key)) || (r.kind === "files" && String(key).startsWith("file:")));
   if (folded >= 0) return folded;
   return Math.max(0, rows.findIndex((r) => r.kind === "check"));
 }

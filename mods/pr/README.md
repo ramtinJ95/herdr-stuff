@@ -38,11 +38,11 @@ A pinned pane does not follow its tab, names its repository in the header beside
 | Key | Does |
 | --- | --- |
 | j, k, arrows | Move the selection |
-| Enter, Space | Open or close the description or a group, or show a check's steps |
-| o | Open the selected check, or the pull request, on GitHub |
+| Enter, Space | Open or close the description, the files or a group, or show a check's steps or a file's diff |
+| o | Open the selected check, the pull request, or from a file its files page, on GitHub |
 | r | Refresh now |
 | m | Merge: the first press says what will happen, the second does it. A held key does neither |
-| Esc | Take back the first press of Merge |
+| Esc | Take back the first press of Merge; in a narrow pane, leave a diff or a check's steps for the list |
 | q | Close the pane |
 
 The pane has the keyboard once it opens, and again when you click in it, on Merge too, or move onto it.
@@ -50,6 +50,12 @@ The pane has the keyboard once it opens, and again when you click in it, on Merg
 ## Description
 
 The first row is the description, drawn as Markdown, open until you close it; the pane remembers which. Its comments are counted, not shown: `o` on the row opens the pull request on GitHub.
+
+## Files
+
+The second row is the files the pull request changes, folded until you open it; the pane remembers which. Each file shows its status, path and lines added and removed. Selecting one shows its diff: beside the list in a wide pane, in place of the list after Enter in a narrow one, until Esc.
+
+The diff is GitHub's own patch per file, drawn as plain text with line numbers: no syntax colours, no word-level marks. A line is cut at 400 columns. A file GitHub gives no patch for, a binary one or one too large, says so. Past 300 files the list stops and a row counts the rest.
 
 ## Merge
 
@@ -68,6 +74,7 @@ There is no `pr.merge` command: `herdr-app do` and key bindings cannot merge.
 
 - Every 10 seconds while checks run, every 60 seconds for an open pull request whose checks have settled, never for a merged or closed one. `POLL` in `model.js` holds the delays.
 - The description while its row is open, and again only when the pull request's `updatedAt` moves: an edit, a comment, a review, a push. One more call of 1 point, about 0.5 s. Folded, it is not asked for.
+- The files while their row is open, once per head commit: one REST call per 100 files, which carries every diff. It took 0.6 to 1.1 s on three pull requests of 3 to 30 files. They are not saved between runs.
 - Not at all while the window is hidden or the pane's tab is not the one shown. It asks at once when the tab shows again.
 - Each poll is one query, plus one beside it for the steps of up to 6 running jobs. A finished job's steps are asked for once and kept. Selecting a check asks for its steps alone, not a poll. Each call costs 1 point of GitHub's 5,000 an hour, so a pane left visible on a running pull request uses about 650 an hour.
 - It opens on the last answer it saw for that pull request, description included, marked with its age, and replaces it when the fresh one lands.
@@ -90,10 +97,11 @@ It draws with `theme()` and the terminal palette (`ansi1`, `ansi2`, `ansi3`) for
 
 ## Data
 
-The pane asks `gh` about the pull request for the branch checked out in a folder. It reads the answers in three files, and `merge.js` holds the one thing it changes. `main.js` runs one call at a time: a confirmed merge, else the poll or lookup that is due, else the steps and description the snapshot lacks.
+The pane asks `gh` about the pull request for the branch checked out in a folder. It reads the answers in four files, and `merge.js` holds the one thing it changes. `main.js` runs one call at a time: a confirmed merge, else the poll or lookup that is due, else the steps, description and files the snapshot lacks.
 
-- `query.js` holds the GraphQL. `PR_QUERY` is the poll, which `record.js` shares. It asks for steps only with `$steps`, because steps make a poll about three times slower, and it carries the repository's merge methods, so Merge needs no call of its own. `STEPS_QUERY` asks for the steps of a few check runs by node id. `ABOUT_QUERY` asks for the description, author, labels and reviewers, apart from the poll because none of it moves with CI. `prArgs`, `stepsArgs` and `aboutArgs` build the `gh api graphql` arguments from where the pull request lives.
-- `github.js` is the boundary. `parsePr` turns a `PR_QUERY` answer into a `Snapshot` and throws a `GhError` with a `kind` when the answer has errors or a field it does not read. `mergeSteps` sets the steps from a `STEPS_QUERY` answer on a snapshot. `parseAbout` turns an `ABOUT_QUERY` answer into an `About`. `prLookupArgs` and `parseLookup` find the pull request for a folder's branch with `gh pr view`. `classifyFailure` names what went wrong from a non-zero exit, and `classifyRejection` does the same for a rejected `exec` or a `GhError`. `readAnswer` reads a gh run with a parser and gives the value or the failure.
+- `query.js` holds the GraphQL. `PR_QUERY` is the poll, which `record.js` shares. It asks for steps only with `$steps`, because steps make a poll about three times slower, and it carries the repository's merge methods, so Merge needs no call of its own. `STEPS_QUERY` asks for the steps of a few check runs by node id. `ABOUT_QUERY` asks for the description, author, labels and reviewers, apart from the poll because none of it moves with CI. `prArgs`, `stepsArgs` and `aboutArgs` build the `gh api graphql` arguments from where the pull request lives. `filesArgs` is the one REST call, `pulls/<number>/files`: GraphQL has no diffs.
+- `github.js` is the boundary. `parsePr` turns a `PR_QUERY` answer into a `Snapshot` and throws a `GhError` with a `kind` when the answer has errors or a field it does not read. `mergeSteps` sets the steps from a `STEPS_QUERY` answer on a snapshot. `parseAbout` turns an `ABOUT_QUERY` answer into an `About`. `prLookupArgs` and `parseLookup` find the pull request for a folder's branch with `gh pr view`. `classifyFailure` names what went wrong from a non-zero exit, and `classifyRejection` does the same for a rejected `exec` or a `GhError`. `readAnswer` reads a gh run with a parser and gives the value or the failure. `parseFiles` turns a `filesArgs` answer into the files, each with its patch or null.
+- `diff.js` is pure. `patchRows` turns one file's patch into rows, each with its kind and its line number before and after. `diff.test.js` checks them against a recorded answer: the added and removed rows of each file add up to GitHub's own counts.
 - `model.js` is pure. `summarize` gives the stage, the CI state, what blocks the merge, the headline and its tone. `groups` gives the check rows in display order. `stepsWanted` picks the checks to ask steps for, and `keepSteps` carries a finished job's steps into the next poll's snapshot. `nextPollDelay` and `failureDelay` read the `POLL` table. `offersMerge` says whether the pane offers Merge. `describeFailure` gives the line for a failure. `duration` formats elapsed time.
 - `merge.js` is Merge. `mergeOffer` is the one reading of it: no button, a note, the button off, at rest or armed. The row is drawn from that offer and `mergePress` says what a press does to it, both pure. `confirmMerge` is the second press: it takes the function that runs `gh`, so `merge.test.js` runs it against a recorded answer and a stand-in for `gh pr merge`.
 

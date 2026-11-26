@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { summarize } from "./model.js";
-import { aboutLine, ago, blockerWords, currentStep, failureLines, headlineOf, liveShown, moveSelection, paneRows, reviewerWords, rowUrl, rowsOf, selectedRow, stepLink } from "./view.js";
+import { FILES_SHOWN, aboutLine, ago, blockerWords, currentStep, failureLines, headlineOf, liveShown, moveSelection, paneRows, reviewerWords, rowUrl, rowsOf, selectedRow, stepLink } from "./view.js";
 
 let ids = 0;
 const check = (bucket, extra = {}) => ({
@@ -16,6 +16,9 @@ const pr = (extra = {}) => ({
   additions: 1, deletions: 1, files: 1, ...extra,
 });
 const snapshot = (checks, extra = {}) => ({ pr: pr(extra.pr), checks, hidden: extra.hidden ?? 0, resetAt: null });
+/** What is open in the pane, with the files folded as they start. */
+const shut = (extra = {}) => ({ folds: new Map(), aboutOpen: true, filesOpen: false, files: null, ...extra });
+const file = (path, extra = {}) => ({ path, previous: null, status: "modified", additions: 1, deletions: 0, patch: "@@ -1 +1,2 @@\n a\n+b", ...extra });
 const keys = (rows) => rows.map((r) => (r.kind === "group" ? `${r.group.key}${r.open ? "+" : "-"}` : r.kind === "hidden" ? `hidden ${r.count}` : r.check.bucket));
 
 test("failed, running and cancelled show their checks; passed folds when anything failed; skipped always folds", () => {
@@ -102,9 +105,36 @@ test("a pinned pane names its pull request where a following pane says this bran
 test("o opens the selected check's page, the pull request from its description, else the pull request's checks", () => {
   const linked = check("fail"), bare = check("fail", { link: null });
   const s = snapshot([linked, bare], { hidden: 3 });
-  const rows = paneRows(s, new Map(), true);
-  assert.deepEqual(rows.map((row) => row.kind), ["about", "group", "check", "check", "hidden"]);
-  assert.deepEqual(rows.map((row) => rowUrl(row, s)), [s.pr.url, `${s.pr.url}/checks`, linked.link, `${s.pr.url}/checks`, `${s.pr.url}/checks`]);
+  const rows = paneRows(s, shut());
+  assert.deepEqual(rows.map((row) => row.kind), ["about", "files", "group", "check", "check", "hidden"]);
+  assert.deepEqual(rows.map((row) => rowUrl(row, s)), [s.pr.url, `${s.pr.url}/files`, `${s.pr.url}/checks`, linked.link, `${s.pr.url}/checks`, `${s.pr.url}/checks`]);
+});
+
+test("the files are listed under their row once it is open and GitHub has listed them, and o on one opens the pull request's files", () => {
+  const s = snapshot([check("pass")], { pr: { files: 2 } });
+  const list = [file("src/a.ts"), file("b.md")];
+  assert.deepEqual(paneRows(s, shut({ files: list })).map((row) => row.kind), ["about", "files", "group", "check"]);
+  assert.deepEqual(paneRows(s, shut({ filesOpen: true })).map((row) => row.kind), ["about", "files", "group", "check"]);
+  const rows = paneRows(s, shut({ filesOpen: true, files: list }));
+  assert.deepEqual(rows.slice(1, 4), [{ kind: "files", key: "files", open: true, count: 2 },
+    { kind: "file", key: "file:src/a.ts", file: list[0] }, { kind: "file", key: "file:b.md", file: list[1] }]);
+  assert.equal(rowUrl(rows[2], s), `${s.pr.url}/files`);
+});
+
+test("a selected file is still the selection's place after the files fold: their row stands in for it", () => {
+  const s = snapshot([check("pass")]);
+  const list = [file("a.ts")];
+  const folded = paneRows(s, shut({ files: list }));
+  assert.equal(selectedRow(folded, "file:a.ts").kind, "files");
+  assert.equal(moveSelection(folded, "file:a.ts", 1), folded[2].key);
+});
+
+test(`past ${FILES_SHOWN} files the list stops and one row counts the rest`, () => {
+  const list = Array.from({ length: FILES_SHOWN + 2 }, (_, i) => file(`f${i}.ts`));
+  const rows = paneRows(snapshot([]), shut({ filesOpen: true, files: list }));
+  assert.equal(rows.filter((row) => row.kind === "file").length, FILES_SHOWN);
+  assert.deepEqual(rows.at(-1), { kind: "more-files", key: "more-files", count: 2 });
+  assert.equal(rowUrl(rows.at(-1), snapshot([])), "https://github.com/o/r/pull/146/files");
 });
 
 test("ages read in the largest whole unit", () => {
@@ -119,12 +149,12 @@ test("what is shown is live only as GitHub's latest answer: not a saved copy, no
 });
 
 test("the description is the pane's first row, and the selection still starts on the first check", () => {
-  const rows = paneRows(snapshot([check("fail"), check("pass")]), new Map(), true);
-  assert.deepEqual(rows[0], { kind: "about", key: "about", open: true });
-  assert.equal(selectedRow(rows, null), rows[2]);
-  assert.equal(moveSelection(rows, rows[2].key, -5), "about");
-  const alone = paneRows(snapshot([]), new Map(), false);
-  assert.deepEqual(alone, [{ kind: "about", key: "about", open: false }]);
+  const rows = paneRows(snapshot([check("fail"), check("pass")]), shut());
+  assert.deepEqual(rows.slice(0, 2), [{ kind: "about", key: "about", open: true }, { kind: "files", key: "files", open: false, count: 1 }]);
+  assert.equal(selectedRow(rows, null), rows[3]);
+  assert.equal(moveSelection(rows, rows[3].key, -5), "about");
+  const alone = paneRows(snapshot([]), shut({ aboutOpen: false }));
+  assert.deepEqual(alone, [{ kind: "about", key: "about", open: false }, { kind: "files", key: "files", open: false, count: 1 }]);
   assert.equal(selectedRow(alone, null), alone[0]);
 });
 

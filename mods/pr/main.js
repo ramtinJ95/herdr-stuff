@@ -1,25 +1,31 @@
 import { View } from "gpui-kit";
 import { ScrollHandle } from "gpui-base";
 import { checking, exec, focused, nextCommand, panes, props, readTextFile, run, settings, spaces, window as appWindow } from "herdr";
-import { aboutArgs, prArgs, stepsArgs } from "./query.js";
-import { classifyFailure, classifyRejection, firstLine, frameAnswer, mergeSteps, parseAbout, parseLookup, parsePin, parsePr, prLookupArgs, readAnswer } from "./github.js";
+import { aboutArgs, filesArgs, prArgs, stepsArgs } from "./query.js";
+import { classifyFailure, classifyRejection, firstLine, frameAnswer, mergeSteps, parseAbout, parseFiles, parseLookup, parsePin, parsePr, prLookupArgs, readAnswer } from "./github.js";
 import { failureDelay, keepSteps, nextPollDelay, offersMerge, stepsWanted, summarize, troubleAfter } from "./model.js";
 import { liveShown, moveSelection, paneRows, rowUrl, selectedRow } from "./view.js";
+import { diffOf } from "./diff.js";
 import { confirmMerge, mergeMethod, mergeOffer, mergePress } from "./merge.js";
 import { WIDE_PX, drawPane } from "./draw.js";
 
 /** @typedef {import("./github.js").Snapshot} Snapshot */
 /** @typedef {import("./github.js").About} About */
+/** @typedef {import("./github.js").File} File */
 /** @typedef {import("./github.js").Target} Target */
 /** @typedef {import("./model.js").Trouble} Trouble */
 /** @typedef {import("./merge.js").MergeMethod} MergeMethod */
 /** @typedef {import("./merge.js").MergeUi} MergeUi */
 /** Where gh runs. A pinned pane has no folder or branch: `pin` names the pull request it was given. @typedef {{ cwd: string | null, branch: string | null, machine: string | null, pin: string | null }} Place */
-/** What is drawn of a pull request: the poll's snapshot and the description read apart from it. @typedef {{ snapshot: Snapshot, about: About | null, fetchedAt: number, source: "cache" | "live" | "replay" }} Shown */
+/**
+ * What is drawn of a pull request: the poll's snapshot, and the description and the files read apart from it.
+ * `files` are those of the head commit named beside them, and are not saved.
+ * @typedef {{ snapshot: Snapshot, about: About | null, files: { head: string, list: File[] } | null, fetchedAt: number, source: "cache" | "live" | "replay" }} Shown
+ */
 /**
  * `method` is undefined until GitHub has answered with the repository's merge methods.
  * @typedef {{ phase: "showing", place: Place, target: Target, localHead: string | null, method: MergeMethod | null | undefined,
- *   shown: Shown | null, trouble: Trouble | null, stepsError: string | null, aboutError: string | null }} Showing
+ *   shown: Shown | null, trouble: Trouble | null, stepsError: string | null, aboutError: string | null, filesError: string | null }} Showing
  */
 /**
  * @typedef {{ phase: "idle" }
@@ -39,6 +45,7 @@ const PLACES_KEPT = 50;
 const CACHE_ORDER = "pr:v1:order";
 const PLACES = "pr:v1:places";
 const ABOUT_OPEN = "pr:v1:about-open";
+const FILES_OPEN = "pr:v1:files-open";
 const cacheKey = (target) => `pr:v1:${target.host}/${target.owner}/${target.name}#${target.number}`;
 const placeKey = (place) => (place === null ? null : JSON.stringify([place.machine, place.cwd, place.branch]));
 const after = (ms) => (ms === null ? null : Date.now() + ms);
@@ -79,6 +86,9 @@ export default class PullRequest extends View {
     this.selected = null;
     this.folds = new Map();
     this.aboutOpen = this.saved(ABOUT_OPEN, true) === true;
+    this.filesOpen = this.saved(FILES_OPEN, false) === true;
+    /** The diff last drawn, parsed once. @type {({ key: string } & ReturnType<typeof diffOf>) | null} */
+    this.diffed = null;
     this.expanded = false;
     this.wide = false;
     this.handle = cx.focus_handle();
@@ -122,7 +132,7 @@ export default class PullRequest extends View {
 
   /** @returns {Showing} */
   opening(place, target) {
-    return { phase: "showing", place, target, localHead: null, method: undefined, shown: this.cached(target), trouble: null, stepsError: null, aboutError: null };
+    return { phase: "showing", place, target, localHead: null, method: undefined, shown: this.cached(target), trouble: null, stepsError: null, aboutError: null, filesError: null };
   }
 
   track(cx) {
@@ -144,16 +154,18 @@ export default class PullRequest extends View {
     return moved || lapsed;
   }
 
-  onScreen(phase) {
-    // Opening the pane, or its terminal moving, is asked for, so that first look goes ahead even in a hidden window.
-    return (appWindow()?.visible !== false || phase === "locating") && focused()?.tab === this.tab;
+  /** @param {State} s */
+  onScreen(s) {
+    // Opening the pane, or its terminal moving, is asked for, so the first look, until GitHub has answered once, goes ahead even in a hidden window.
+    const first = s.phase === "locating" || (s.phase === "showing" && s.shown?.source !== "live" && s.trouble === null);
+    return (appWindow()?.visible !== false || first) && focused()?.tab === this.tab;
   }
 
   /** Runs the one thing there is to do, if nothing is running; whatever it was, it looks again when done. */
   pump(cx) {
     const s = this.state;
     if (checking() || s.phase === "idle" || s.phase === "replay" || s.phase === "bad-pin") return;
-    const shown = this.onScreen(s.phase);
+    const shown = this.onScreen(s);
     if (shown && !this.wasShown && this.due === null) this.due = Date.now();
     this.wasShown = shown;
     if (this.busy) return;
@@ -261,7 +273,7 @@ export default class PullRequest extends View {
     this.resetAt = snapshot.resetAt ?? this.resetAt;
     /** @type {Showing} */
     const landed = { ...s, localHead, method: list.value.method, trouble: null, stepsError: null,
-      shown: { snapshot, about: s.shown?.about ?? null, fetchedAt: Date.now(), source: "live" } };
+      shown: { snapshot, about: s.shown?.about ?? null, files: s.shown?.files ?? null, fetchedAt: Date.now(), source: "live" } };
     this.state = steps === null ? landed : this.withSteps(landed, steps);
     this.due = after(nextPollDelay(summarize(snapshot).ci.kind, snapshot.pr.state));
     cx.notify();
@@ -272,26 +284,33 @@ export default class PullRequest extends View {
 
   /**
    * Reads what the snapshot leaves out, each only when wanted and missing: steps for the selected check and the running ones,
-   * and the description while it is open and older than the pull request. `asked` are the checks whose steps were just asked for.
+   * the description while it is open and older than the pull request, and the files while they are open and of another
+   * head commit. `asked` are the checks whose steps were just asked for.
    */
   async parts(cx, gen, asked = []) {
     this.more = false;
     const was = this.showing(gen);
     if (was === null || was.shown === null || was.shown.source !== "live") return;
     const { target, place } = was;
-    const { snapshot, about } = was.shown;
+    const { snapshot, about, files } = was.shown;
     const missing = stepsWanted(snapshot, this.detailId(), STEPS_MAX)
       .filter((id) => !asked.includes(id) && snapshot.checks.find((c) => c.id === id).steps === null);
     const behind = this.aboutOpen && about?.updatedAt !== snapshot.pr.updatedAt;
-    if (missing.length === 0 && !behind) return;
-    const [steps, read] = await Promise.all([
+    const moved = this.filesOpen && files?.head !== snapshot.pr.head;
+    if (missing.length === 0 && !behind && !moved) return;
+    const [steps, read, listed] = await Promise.all([
       missing.length === 0 ? null : this.gh(stepsArgs(missing, target.host), place),
       behind ? this.ask(aboutArgs(target), place, (stdout) => parseAbout(JSON.parse(stdout))) : null,
+      moved ? this.ask(filesArgs(target), place, (stdout) => parseFiles(JSON.parse(stdout))) : null,
     ]);
     let s = this.showing(gen);
     if (s === null || s.shown === null) return;
     if (steps !== null) s = this.withSteps(s, steps);
     if (read !== null) s = read.failure === null ? { ...s, aboutError: null, shown: { ...s.shown, about: read.value } } : { ...s, aboutError: firstLine(read.failure.text) };
+    if (listed !== null) {
+      s = listed.failure === null ? { ...s, filesError: null, shown: { ...s.shown, files: { head: snapshot.pr.head, list: listed.value } } }
+        : { ...s, filesError: firstLine(listed.failure.text) };
+    }
     this.state = s;
     cx.notify();
   }
@@ -310,7 +329,7 @@ export default class PullRequest extends View {
       const text = await readTextFile(file);
       if (text === null) throw new Error(`${file} does not exist`);
       const frame = JSON.parse(text);
-      this.state = { phase: "replay", file, shown: { snapshot: parsePr(frameAnswer(frame)), about: null, fetchedAt: Date.parse(frame.at), source: "replay" }, trouble: null };
+      this.state = { phase: "replay", file, shown: { snapshot: parsePr(frameAnswer(frame)), about: null, files: null, fetchedAt: Date.parse(frame.at), source: "replay" }, trouble: null };
     } catch (e) {
       this.state = { phase: "replay", file, shown: null, trouble: { failure: classifyRejection(e), streak: 1 } };
     }
@@ -328,7 +347,7 @@ export default class PullRequest extends View {
   /** @returns {Shown | null} */
   cached(target) {
     const saved = this.saved(cacheKey(target), null);
-    return saved === null ? null : { snapshot: saved.snapshot, about: saved.about ?? null, fetchedAt: saved.fetchedAt, source: "cache" };
+    return saved === null ? null : { snapshot: saved.snapshot, about: saved.about ?? null, files: null, fetchedAt: saved.fetchedAt, source: "cache" };
   }
 
   /** Saves what is shown, without steps: they are read again for the checks that want them. */
@@ -359,8 +378,22 @@ export default class PullRequest extends View {
   }
 
   rows() {
-    const snapshot = this.snapshot();
-    return snapshot === null ? [] : paneRows(snapshot, this.folds, this.aboutOpen);
+    const shown = "shown" in this.state ? this.state.shown : null;
+    if (shown === null) return [];
+    return paneRows(shown.snapshot, { folds: this.folds, aboutOpen: this.aboutOpen, filesOpen: this.filesOpen, files: shown.files?.list ?? null });
+  }
+
+  /** The file whose diff is drawn: the selected one, beside the list in a wide pane, in place of it once opened in a narrow one. @returns {File | null} */
+  detailFile() {
+    const row = selectedRow(this.rows(), this.selected);
+    return row?.kind === "file" && (this.wide || this.expanded) ? row.file : null;
+  }
+
+  /** A file's diff ready to draw, parsed once for as long as it is the one drawn. `patch` is not null. */
+  diff(file) {
+    const key = `${this.snapshot().pr.head}:${file.path}`;
+    if (this.diffed?.key !== key) this.diffed = { key, ...diffOf(file.patch) };
+    return this.diffed;
   }
 
   detailId() {
@@ -379,8 +412,12 @@ export default class PullRequest extends View {
       this.aboutOpen = !row.open;
       save(ABOUT_OPEN, this.aboutOpen);
     }
-    if (row.kind === "hidden") cx.open_url(rowUrl(row, this.snapshot()));
-    if (row.kind === "check") this.expanded = row.key === selectedRow(this.rows(), this.selected)?.key ? !this.expanded : true;
+    if (row.kind === "files") {
+      this.filesOpen = !row.open;
+      save(FILES_OPEN, this.filesOpen);
+    }
+    if (row.kind === "hidden" || row.kind === "more-files") cx.open_url(rowUrl(row, this.snapshot()));
+    if (row.kind === "check" || row.kind === "file") this.expanded = row.key === selectedRow(this.rows(), this.selected)?.key ? !this.expanded : true;
     this.select(row.key);
     cx.notify();
   }
@@ -405,7 +442,7 @@ export default class PullRequest extends View {
       // Each row is one child of the list, so its place in `rows` is the child to reveal.
       this.scroll.scroll_to_item(Math.max(0, rows.findIndex((r) => r.key === this.selected)));
     } else if (action === "toggle" && row !== null) {
-      if (row.kind === "check") this.expanded = !this.expanded;
+      if (row.kind === "check" || row.kind === "file") this.expanded = !this.expanded;
       else this.clickRow(cx, row);
       this.more = true;
     } else if (action === "open" && row !== null) {

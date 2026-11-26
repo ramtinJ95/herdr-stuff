@@ -1,6 +1,7 @@
 import { div } from "gpui-kit";
-import { TextView, h_flex, v_flex } from "gpui-base";
-import { theme } from "herdr";
+import { Scrollbar, TextView, h_flex, v_flex, v_virtual_list } from "gpui-base";
+import { settings, theme } from "herdr";
+import { rowNumber } from "./diff.js";
 import { duration, hasSteps, plural, summarize } from "./model.js";
 import { aboutLine, ago, blockerWords, currentStep, failureLines, headlineOf, liveShown, reviewerWords, selectedRow, stepLink } from "./view.js";
 
@@ -60,31 +61,38 @@ export function drawPane(app, now) {
     .child("shown" in s && s.shown !== null ? snapshotView(app, t, s, now) : PLACEHOLDERS[s.phase](app, t, s, now));
 }
 
+const CHECK_ROWS = ["group", "check", "hidden"];
+
 function snapshotView(app, t, s, now) {
   const { snapshot } = s.shown;
   const clock = s.shown.source === "replay" ? s.shown.fetchedAt : now;
   const sum = summarize(snapshot, { localHead: s.phase === "showing" ? s.localHead : null });
   const rows = app.rows();
-  const checks = rows.some((r) => r.kind !== "about");
   const selected = selectedRow(rows, app.selected);
-  const detailed = selected?.kind === "check" ? selected.check : null;
+  const check = selected?.kind === "check" ? selected.check : null;
+  const file = app.detailFile();
+  const pane = v_flex().size_full().min_h(0).child(header(app, t, s, sum, now));
+  // A diff wants the pane's width: in a narrow pane it stands in place of the list until Esc.
+  if (!app.wide && file !== null) return pane.child(diffPane(app, t, file, "Esc for the list"));
   // Each row is one child of the list, whatever opens under it, so a row's place in `rows` is the child scroll_to_item reveals.
   const items = rows.map((row) => {
     const drawn = rowView(app, t, row, row === selected, clock);
     const under = row.kind === "about" && row.open ? aboutBlock(t, s, now)
-      : !app.wide && app.expanded && row === selected && detailed !== null
-        ? div().id("details-under").ml(24).mr(12).my(4).rounded(6).bg(t.raised).child(details(t, detailed, s, clock))
+      : row.kind === "files" && row.open && s.shown.files === null ? filesNote(t, s)
+      : !app.wide && app.expanded && row === selected && check !== null
+        ? div().id("details-under").ml(24).mr(12).my(4).rounded(6).bg(t.raised).child(details(t, check, s, clock))
         : null;
     return under === null ? drawn : v_flex().flex_none().child(drawn).child(under);
   });
-  const list = v_flex().id("checks").flex_1().min_w(0).min_h(0).py(4).overflow_y_scrollbar().track_scroll(app.scroll)
-    .children(checks ? items : [...items, line("No checks reported for this commit.", t.muted).px(14).py(8)]);
-  const body = app.wide && checks
-    ? h_flex().flex_1().min_h(0).items_start().child(list.h_full())
-      .child(v_flex().id("details").flex_1().min_w(0).h_full().border_l_1().border_color(t.border).overflow_y_scrollbar()
-        .child(detailed !== null ? details(t, detailed, s, clock) : line("Select a check to see its steps.", t.dim).p(12)))
-    : list;
-  return v_flex().size_full().min_h(0).child(header(app, t, s, sum, now)).child(body);
+  const list = v_flex().id("checks").min_w(0).min_h(0).py(4).overflow_y_scrollbar().track_scroll(app.scroll)
+    .children(rows.some((r) => CHECK_ROWS.includes(r.kind)) ? items : [...items, line("No checks reported for this commit.", t.muted).px(14).py(8)]);
+  if (!app.wide || !rows.some((r) => CHECK_ROWS.includes(r.kind) || r.kind === "file")) return pane.child(list.flex_1());
+  const side = file !== null ? div().flex_1().min_w(0).h_full().border_l_1().border_color(t.border).child(diffPane(app, t, file, null))
+    : v_flex().id("details").flex_1().min_w(0).h_full().border_l_1().border_color(t.border).overflow_y_scrollbar()
+      .child(check !== null ? details(t, check, s, clock) : line("Select a check to see its steps, or a file to see its diff.", t.dim).p(12));
+  // Beside a diff the list gives up width: the diff is what is being read.
+  return pane.child(h_flex().flex_1().min_h(0).items_start()
+    .child(file !== null ? div().h_full().flex_none().w_1_3().min_w(260).child(list.size_full()) : list.h_full().flex_1()).child(side));
 }
 
 function header(app, t, s, sum, now) {
@@ -151,6 +159,18 @@ function rowView(app, t, row, selected, now) {
     .children(count === null ? [] : [line(String(count), t.dim)]);
   if (row.kind === "group") return fold(row.group.title, row.group.checks.length);
   if (row.kind === "about") return fold("Description", null);
+  if (row.kind === "files") return fold("Files", row.count);
+  if (row.kind === "more-files") return base.pl(32).child(line(`${plural(row.count, "more file")}: open the PR's files page`, t.dim).truncate());
+  if (row.kind === "file") {
+    const { file } = row;
+    const at = file.path.lastIndexOf("/") + 1;
+    return base.pl(32)
+      .child(fileMark(t, file))
+      .child(h_flex().flex_1().min_w(0).text_size(12.5)
+        .child(div().min_w(0).truncate().text_color(t.dim).child(file.path.slice(0, at)))
+        .child(div().flex_none().max_w_full().truncate().text_color(t.foreground).child(file.path.slice(at))))
+      .children(fileCounts(t, file));
+  }
   if (row.kind === "hidden") {
     return base.pl(32).child(line(`${plural(row.count, "more check")} GitHub did not return: open the PR's checks page`, t.dim).truncate());
   }
@@ -162,6 +182,53 @@ function rowView(app, t, row, selected, now) {
     .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(step === null ? t.dim : t.muted).child(step ?? c.workflow ?? c.app ?? ""))
     .when(c.required, (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child("req")))
     .child(div().flex_none().w(52).text_right().text_size(11.5).text_color(t.dim).child(duration(c.startedAt, c.completedAt, now)));
+}
+
+const FILE_MARKS = { added: "A", removed: "D", renamed: "R", copied: "C", modified: "M", changed: "M", unchanged: "·" };
+const fileMark = (t, file) => div().w(14).flex_none().text_size(11).text_color({ added: t.ansi2, removed: t.ansi1 }[file.status] ?? t.ansi3).child(FILE_MARKS[file.status]);
+const fileCounts = (t, file) => [
+  ...file.additions > 0 ? [div().flex_none().text_size(11).text_color(t.ansi2).child(`+${file.additions}`)] : [],
+  ...file.deletions > 0 ? [div().flex_none().text_size(11).text_color(t.ansi1).child(`−${file.deletions}`)] : [],
+];
+
+function filesNote(t, s) {
+  const error = s.phase === "showing" ? s.filesError : null;
+  return line(s.phase === "replay" ? "A replay frame has no files." : error !== null ? `The files did not load: ${error}` : "Reading the files…", t.dim).pl(32).pr(14).pb(8);
+}
+
+/** Columns a diff is laid out for; a longer line is cut, not scrolled to. */
+const DIFF_COLUMNS = 400;
+const DIFF_INK = { add: "18", del: "18" };
+
+/** One file's diff, filling the space it is given. `hint` is a word on how to leave, where there is a way. */
+function diffPane(app, t, file, hint) {
+  const top = h_flex().flex_none().h(30).px(12).gap(8).items_center().border_b_1().border_color(t.border)
+    .child(fileMark(t, file))
+    .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(file.previous === null ? file.path : `${file.previous} → ${file.path}`))
+    .children(fileCounts(t, file))
+    .children(hint === null ? [] : [div().flex_none().text_size(11).text_color(t.dim).child(hint)]);
+  const pane = v_flex().size_full().min_h(0).child(top);
+  if (file.patch === null) {
+    return pane.child(line(file.additions + file.deletions > 0 ? "GitHub gives no diff for this file: it is too large. Press o to open the pull request's files."
+      : "No text diff: a binary file, or one that only moved.", t.muted).p(12));
+  }
+  const { rows, columns, digits } = app.diff(file);
+  const size = settings().font_size ?? 13;
+  const height = Math.ceil(size * 1.8), char = size * 0.64, gutter = Math.ceil(digits * char) + 2;
+  const id = `diff:${file.path}`;
+  const draw = (row) => {
+    if (row.kind === "hunk" || row.kind === "note") return div().w_full().h(height).flex_none().px(12).truncate().bg(t.raised).text_color(t.dim).child(row.text);
+    return h_flex().w_full().h(height).flex_none().gap(10).items_center()
+      .when(row.kind === "add", (el) => el.bg(t.ansi2 + DIFF_INK.add)).when(row.kind === "del", (el) => el.bg(t.ansi1 + DIFF_INK.del))
+      .child(div().w(gutter).ml(6).flex_none().text_right().text_color(t.dim).child(String(rowNumber(row))))
+      .child(div().w(char).flex_none().text_color(row.kind === "add" ? t.ansi2 : row.kind === "del" ? t.ansi1 : t.dim).child(row.kind === "add" ? "+" : row.kind === "del" ? "−" : ""))
+      .child(div().flex_1().min_w(0).truncate().child(row.text.slice(0, DIFF_COLUMNS) || " "));
+  };
+  return pane.child(div().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(size)
+    .child(div().id(`${id}:x`).size_full().overflow_x_scrollbar()
+      .child(div().w_full().min_w(Math.max(300, Math.min(columns, DIFF_COLUMNS) * char + gutter + 6 + char + 40)).h_full()
+        .child(v_virtual_list(id, rows.length, height, (i) => String(i), (range) => rows.slice(range.start, range.end).map(draw)).size_full())))
+    .child(Scrollbar.vertical(id).viewport_from_layout().absolute().inset_0()));
 }
 
 function aboutBlock(t, s, now) {
