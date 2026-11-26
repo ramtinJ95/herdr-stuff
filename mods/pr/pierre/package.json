@@ -1,0 +1,9 @@
+{
+  "name": "herdr-pr-pane-pierre",
+  "description": "The Node helper that colours the PR pane's diffs. Herdr does not load this folder: node runs highlight.mjs.",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@pierre/diffs": "1.7.2"
+  }
+}
