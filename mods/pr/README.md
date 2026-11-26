@@ -19,6 +19,14 @@ ln -s "$PWD/herdr-stuff/mods/pr" ~/.config/herdr-app/mods/pr
 
 Merge `keys.json` into `~/.config/herdr-app/keys.json`. **Ctrl-f o** splits the focused pane to the right with the pull request pane, and **Ctrl-f Shift-o** closes the one in the tab you are in, from any pane. The command palette has the first as **Pull request**.
 
+For syntax colours in the diffs, install the helper's one package (53 packages, 49 MB, in a folder git ignores). It needs `node` on this computer:
+
+```sh
+cd herdr-stuff/mods/pr/pierre && npm install
+```
+
+Without it the pane works the same and its diffs are plain.
+
 ## Which pull request
 
 The pane follows its tab. It shows the pull request of the terminal you focused last in that tab, and changes when you focus another terminal or that terminal changes folder or branch. It takes the folder and branch from the terminals beside it, since a mod pane has neither.
@@ -55,7 +63,11 @@ The first row is the description, drawn as Markdown, open until you close it; th
 
 The second row is the files the pull request changes, folded until you open it; the pane remembers which. Each file shows its status, path and lines added and removed. Selecting one shows its diff: beside the list in a wide pane, in place of the list after Enter in a narrow one, until Esc.
 
-The diff is GitHub's own patch per file, drawn as plain text with line numbers: no syntax colours, no word-level marks. A line is cut at 400 columns. A file GitHub gives no patch for, a binary one or one too large, says so. Past 300 files the list stops and a row counts the rest.
+The diff is GitHub's own patch per file, with line numbers. It is drawn plain at once, and a moment later in syntax colours, with the part of a changed line that differs marked. The colours come from [Pierre](https://diffs.com) (`@pierre/diffs`), which reads each file's language and tells the pane what each stretch of a line is: a keyword, a string, a comment. The pane picks the colour for each from the terminal palette, so a diff follows the layout it stands in.
+
+Pierre is a web library and Herdr has no web view, and its highlighter does not run in Herdr's own JavaScript runtime. So the pane runs it with `node`, on this computer, once for all of a pull request's files: `pierre/highlight.mjs`. It hands the helper the diffs in a file under `~/.config/herdr-app/cache/pr`, removed when the run ends. A diff that stays plain says why in a line above it: the package is not installed, `node` did not run, or the helper's lines were not this diff's lines. Pierre does not colour a line longer than 1,000 characters.
+
+A line is cut at 400 columns. A file GitHub gives no patch for, a binary one or one too large, says so. Past 300 files the list stops and a row counts the rest.
 
 ## Merge
 
@@ -74,7 +86,7 @@ There is no `pr.merge` command: `herdr-app do` and key bindings cannot merge.
 
 - Every 10 seconds while checks run, every 60 seconds for an open pull request whose checks have settled, never for a merged or closed one. `POLL` in `model.js` holds the delays.
 - The description while its row is open, and again only when the pull request's `updatedAt` moves: an edit, a comment, a review, a push. One more call of 1 point, about 0.5 s. Folded, it is not asked for.
-- The files while their row is open, once per head commit: one REST call per 100 files, which carries every diff. It took 0.6 to 1.1 s on three pull requests of 3 to 30 files. They are not saved between runs.
+- The files while their row is open, once per head commit: one REST call per 100 files, which carries every diff. It took 0.6 to 1.1 s on three pull requests of 3 to 30 files. They are not saved between runs. The colours ask GitHub nothing: one run of `node` after the files land, 0.3 to 1.7 s on those three.
 - Not at all while the window is hidden or the pane's tab is not the one shown. It asks at once when the tab shows again.
 - Each poll is one query, plus one beside it for the steps of up to 6 running jobs. A finished job's steps are asked for once and kept. Selecting a check asks for its steps alone, not a poll. Each call costs 1 point of GitHub's 5,000 an hour, so a pane left visible on a running pull request uses about 650 an hour.
 - It opens on the last answer it saw for that pull request, description included, marked with its age, and replaces it when the fresh one lands.
@@ -101,7 +113,8 @@ The pane asks `gh` about the pull request for the branch checked out in a folder
 
 - `query.js` holds the GraphQL. `PR_QUERY` is the poll, which `record.js` shares. It asks for steps only with `$steps`, because steps make a poll about three times slower, and it carries the repository's merge methods, so Merge needs no call of its own. `STEPS_QUERY` asks for the steps of a few check runs by node id. `ABOUT_QUERY` asks for the description, author, labels and reviewers, apart from the poll because none of it moves with CI. `prArgs`, `stepsArgs` and `aboutArgs` build the `gh api graphql` arguments from where the pull request lives. `filesArgs` is the one REST call, `pulls/<number>/files`: GraphQL has no diffs.
 - `github.js` is the boundary. `parsePr` turns a `PR_QUERY` answer into a `Snapshot` and throws a `GhError` with a `kind` when the answer has errors or a field it does not read. `mergeSteps` sets the steps from a `STEPS_QUERY` answer on a snapshot. `parseAbout` turns an `ABOUT_QUERY` answer into an `About`. `prLookupArgs` and `parseLookup` find the pull request for a folder's branch with `gh pr view`. `classifyFailure` names what went wrong from a non-zero exit, and `classifyRejection` does the same for a rejected `exec` or a `GhError`. `readAnswer` reads a gh run with a parser and gives the value or the failure. `parseFiles` turns a `filesArgs` answer into the files, each with its patch or null.
-- `diff.js` is pure. `patchRows` turns one file's patch into rows, each with its kind and its line number before and after. `diff.test.js` checks them against a recorded answer: the added and removed rows of each file add up to GitHub's own counts.
+- `diff.js` is pure. `patchRows` turns one file's patch into rows, each with its kind and its line number before and after. `diff.test.js` checks them against a recorded answer: the added and removed rows of each file add up to GitHub's own counts. `coloursOf` reads a run of the helper, and `paintRows` puts its lines on the rows only when every line is the same line: same count, kind, number and text. Colours on the wrong line would be worse than none, so one line off leaves that file plain, and `plainNote` gives the reason.
+- `pierre/highlight.mjs` is the helper, for node and not for Herdr. It gives Pierre each file's diff under a theme whose colours only name roles (`ROLES` in `diff.js`), and prints each line as spans of role, text and whether that part changed. Its answer is the same in every theme. `pierre/highlight.test.js` runs it as the pane does, on the recorded answer, and is skipped where the package is not installed.
 - `model.js` is pure. `summarize` gives the stage, the CI state, what blocks the merge, the headline and its tone. `groups` gives the check rows in display order. `stepsWanted` picks the checks to ask steps for, and `keepSteps` carries a finished job's steps into the next poll's snapshot. `nextPollDelay` and `failureDelay` read the `POLL` table. `offersMerge` says whether the pane offers Merge. `describeFailure` gives the line for a failure. `duration` formats elapsed time.
 - `merge.js` is Merge. `mergeOffer` is the one reading of it: no button, a note, the button off, at rest or armed. The row is drawn from that offer and `mergePress` says what a press does to it, both pure. `confirmMerge` is the second press: it takes the function that runs `gh`, so `merge.test.js` runs it against a recorded answer and a stand-in for `gh pr merge`.
 
