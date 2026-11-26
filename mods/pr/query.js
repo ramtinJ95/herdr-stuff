@@ -69,6 +69,14 @@ export const prArgs = (target, { steps = false } = {}) => graphqlArgs(target.hos
 /** @param {Target} target */
 export const aboutArgs = (target) => graphqlArgs(target.host, ABOUT_QUERY, prFields(target));
 
+/**
+ * The files a pull request changes, each with its diff, from GitHub's REST API: GraphQL has no diffs.
+ * `--slurp` prints the pages as one list of lists.
+ * @param {Target} target
+ */
+export const filesArgs = (target) =>
+  ["api", "--hostname", target.host, `repos/${target.owner}/${target.name}/pulls/${target.number}/files?per_page=100`, "--paginate", "--slurp"];
+
 /** The args for the steps of these check runs. GitHub rejects an empty list, so this throws on one. */
 export function stepsArgs(ids, host = "github.com") {
   if (ids.length === 0) throw new Error("stepsArgs needs at least one check id");

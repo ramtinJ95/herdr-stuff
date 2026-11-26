@@ -24,6 +24,13 @@
  *   asked: (string | null)[], comments: number, commits: number }} About
  */
 
+/**
+ * A file a pull request changes. `previous` is its path before a rename; `patch` is its diff, null where GitHub gives none:
+ * a binary file, one that only moved, one too large.
+ * @typedef {{ path: string, previous: string | null, status: "added" | "removed" | "modified" | "renamed" | "copied" | "changed" | "unchanged",
+ *   additions: number, deletions: number, patch: string | null }} File
+ */
+
 /** A failure thrown by the parsers here; `kind` is a FailureKind. */
 export class GhError extends Error {
   /** @param {FailureKind} kind @param {string} text */
@@ -48,6 +55,7 @@ const PR_STATES = ["OPEN", "CLOSED", "MERGED"];
 const MERGEABLE = ["MERGEABLE", "CONFLICTING", "UNKNOWN"];
 const MERGE_STATES = ["CLEAN", "HAS_HOOKS", "UNSTABLE", "BLOCKED", "BEHIND", "DIRTY", "DRAFT", "UNKNOWN"];
 const REVIEWS = ["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", null];
+const FILE_STATES = ["added", "removed", "modified", "renamed", "copied", "changed", "unchanged"];
 const REVIEW_STATES = ["APPROVED", "CHANGES_REQUESTED", "DISMISSED", "COMMENTED", "PENDING"];
 
 const unread = (path, value) => {
@@ -189,6 +197,22 @@ export function parseAbout(raw) {
     asked: nodes("reviewRequests").map((r, i) => named(obj(r, at(`reviewRequests.nodes[${i}]`)).requestedReviewer, at(`reviewRequests.nodes[${i}].requestedReviewer`))),
     comments: count("comments"), commits: count("commits"),
   };
+}
+
+/**
+ * The files in a `filesArgs` answer: a list of pages, each a list of files. Throws a GhError on a field this pane does not read.
+ * @returns {File[]}
+ */
+export function parseFiles(raw) {
+  return list(raw, "pages").flatMap((page, p) => list(page, `pages[${p}]`).map((f, i) => {
+    const at = `pages[${p}][${i}]`;
+    obj(f, at);
+    return {
+      path: str(f.filename, `${at}.filename`), previous: f.previous_filename === undefined ? null : str(f.previous_filename, `${at}.previous_filename`),
+      status: oneOf(FILE_STATES)(f.status, `${at}.status`), additions: int(f.additions, `${at}.additions`), deletions: int(f.deletions, `${at}.deletions`),
+      patch: f.patch === undefined ? null : str(f.patch, `${at}.patch`),
+    };
+  }));
 }
 
 /**
