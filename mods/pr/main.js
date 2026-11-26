@@ -394,13 +394,16 @@ export default class PullRequest extends View {
     } else if (action === "escape") {
       this.expanded = false;
     } else if (action === "close") {
-      this.close();
+      this.closePane();
     }
     cx.notify();
   }
 
-  /** Closes this pane: the focused one of this mod in its tab, else the only one. */
-  close() {
+  /**
+   * Closes this pane: the focused one of this mod in its tab, else the only one.
+   * Not named `close`: Herdr calls a view's `close` as the pane goes, and this would then take a second pane with it.
+   */
+  closePane() {
     const mine = panes().filter((p) => p.mod === "pr" && p.tab === this.tab);
     const pane = (mine.find((p) => p.focused) ?? mine[0])?.pane;
     if (pane !== undefined) run("pane.close", { pane });
