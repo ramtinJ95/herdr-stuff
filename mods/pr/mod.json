@@ -1,0 +1,6 @@
+{
+  "place": "none",
+  "title": "Pull request",
+  "focusable": true,
+  "palette": [{ "title": "Pull request", "command": "pane.split", "args": { "direction": "right", "mod": "pr" }, "words": "pr ci checks github merge" }]
+}

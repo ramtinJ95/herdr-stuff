@@ -1,0 +1,3 @@
+{
+  "global": { "ctrl-f o": { "command": "pane.split", "args": { "direction": "right", "mod": "pr" } } }
+}

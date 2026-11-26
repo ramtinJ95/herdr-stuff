@@ -6,6 +6,7 @@ Mods for the [Herdr app](https://herdr.dev), one folder each under `mods/`.
 | --- | --- |
 | [nexus](mods/nexus) | Nexus threads beside your terminals: what waits on you, live conversations, answering questions, reviews and landing, pipeline items, the cluster and usage |
 | [cosy](mods/cosy) | A whole-window lofi café layout (`layouts/cosy.json`) cut from one painting: terminals as the window onto a snowy street, tabs as pendant lamps, spaces as a stack of books with the agents as cups under them, a menu card with keys as prices |
+| [pr](mods/pr) | The pull request of the branch you are on, as a pane beside your terminals: its stage, what blocks merging, every check and the step a running job is on, and Merge |
 | [tuido](mods/tuido) | Your tuido todo lists in a floating window: complete, add, open in your editor, sort, archive and sync |
 
 ## Install

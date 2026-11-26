@@ -1,0 +1,106 @@
+import { POLL, describeFailure, groups } from "./model.js";
+
+/** @typedef {import("./github.js").Snapshot} Snapshot */
+/** @typedef {import("./github.js").Check} Check */
+/** @typedef {import("./github.js").Failure} Failure */
+/** @typedef {ReturnType<typeof import("./model.js").summarize>} Summary */
+/** @typedef {ReturnType<typeof groups>[number]} Group */
+/** @typedef {{ kind: "group", key: string, group: Group, open: boolean } | { kind: "check", key: string, check: Check } | { kind: "hidden", key: string, count: number }} Row */
+/** @typedef {{ host: string, owner: string, name: string, number: number }} Target */
+
+export const PASSED_SHOWN = 8;
+
+export function opensByDefault(group, all) {
+  if (group.key === "skipping") return false;
+  if (group.key !== "pass") return true;
+  return group.checks.length <= PASSED_SHOWN && !all.some((g) => g.key === "fail" || g.key === "pending");
+}
+
+/** @returns {Row[]} */
+export function rowsOf(snapshot, folds) {
+  const all = groups(snapshot);
+  const rows = all.flatMap((group) => {
+    const open = folds.get(group.key) ?? opensByDefault(group, all);
+    return [{ kind: "group", key: `group:${group.key}`, group, open },
+      ...open ? group.checks.map((check) => ({ kind: "check", key: check.id, check })) : []];
+  });
+  return snapshot.hidden > 0 ? [...rows, { kind: "hidden", key: "hidden", count: snapshot.hidden }] : rows;
+}
+
+function indexOf(rows, key) {
+  const own = rows.findIndex((r) => r.key === key);
+  if (own >= 0) return own;
+  const folded = rows.findIndex((r) => r.kind === "group" && r.group.checks.some((c) => c.id === key));
+  if (folded >= 0) return folded;
+  return Math.max(0, rows.findIndex((r) => r.kind === "check"));
+}
+
+/** @returns {Row | null} */
+export const selectedRow = (rows, key) => rows[indexOf(rows, key)] ?? null;
+
+export function moveSelection(rows, key, by) {
+  if (rows.length === 0) return null;
+  return rows[Math.min(rows.length - 1, Math.max(0, indexOf(rows, key) + by))].key;
+}
+
+const STAGE_WORDS = { open: "Open", draft: "Draft" };
+const CI_HEADLINE = ["fail", "pending", "cancel"];
+
+export function headlineOf(summary) {
+  const stage = STAGE_WORDS[summary.stage];
+  return stage === undefined || summary.headline === stage ? summary.headline : `${stage} · ${summary.headline}`;
+}
+
+export function blockerWords(summary) {
+  const { merge, ci } = summary;
+  if (merge.kind === "ready") return merge.note !== null && !CI_HEADLINE.includes(ci.kind) ? [merge.note] : [];
+  if (merge.kind !== "blocked") return [];
+  return merge.blockers.filter((b) => b.label !== summary.headline
+    && !(b.kind === "draft" && summary.stage === "draft")
+    && !(b.kind.startsWith("checks-") && CI_HEADLINE.includes(ci.kind))).map((b) => b.label);
+}
+
+export function currentStep(check) {
+  if (check.bucket !== "pending" || check.steps === null || check.steps.length === 0) return null;
+  const at = check.steps.findIndex((s) => s.state === "IN_PROGRESS");
+  const index = at >= 0 ? at : check.steps.findIndex((s) => s.bucket === "pending");
+  return index < 0 ? null : `${index + 1}/${check.steps.length} ${check.steps[index].name}`;
+}
+
+export const stepLink = (check, step) => (check.link === null ? null : `${check.link}#step:${step.number}:1`);
+
+const pad = (n) => String(n).padStart(2, "0");
+const clock = (ms) => `${pad(new Date(ms).getHours())}:${pad(new Date(ms).getMinutes())}`;
+
+export function resetAtOf(raw) {
+  const at = raw?.data?.rateLimit?.resetAt;
+  const ms = typeof at === "string" ? Date.parse(at) : NaN;
+  return Number.isNaN(ms) ? null : ms;
+}
+
+const FIXES = {
+  "no-gh": "Install the GitHub CLI, then run `gh auth login` in a terminal.",
+  "no-auth": "Run `gh auth login` in a terminal.",
+  offline: "The pane tries again by itself.",
+};
+
+export function failureLines(failure, resetAt, now) {
+  const { headline, tone } = describeFailure(failure);
+  if (failure.kind === "rate-limited") {
+    return { headline, tone, fix: resetAt !== null && resetAt > now ? `It resets at ${clock(resetAt)}.` : `The pane tries again in ${POLL["rate-limited"] / 60_000} minutes.` };
+  }
+  return { headline, tone, fix: FIXES[failure.kind] ?? (failure.kind === "unknown" ? failure.text.split("\n")[0].trim() || null : null) };
+}
+
+export function ago(ms, now) {
+  const s = Math.max(0, Math.round((now - ms) / 1000));
+  if (s < 10) return "just now";
+  if (s < 60) return `${s} s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  const days = Math.floor(s / 86400);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+/** Whether what is shown is GitHub's latest answer: not a saved copy, not the last good one after a failed poll. */
+export const liveShown = (shown, trouble) => shown.source === "live" && trouble === null;
