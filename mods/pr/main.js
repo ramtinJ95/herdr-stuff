@@ -43,7 +43,9 @@ const ACTIONS = new Set(Object.values(KEYS).filter((action) => action !== "merge
 
 export default class PullRequest extends View {
   init(_props, cx) {
-    this.tab = focused()?.tab ?? null;
+    // Set by the first draw: a pane is drawn only while its tab is the one shown, and init also runs for a pane in another tab.
+    /** @type {string | null} */
+    this.tab = null;
     const replay = props()?.replay ?? null;
     /** @type {State} */
     this.state = replay === null ? { phase: "idle" } : { phase: "replay", file: replay, shown: null, trouble: null };
@@ -90,7 +92,7 @@ export default class PullRequest extends View {
   }
 
   track(cx) {
-    if (this.state.phase === "replay") return false;
+    if (this.tab === null || this.state.phase === "replay") return false;
     const place = this.followed();
     const moved = placeKey(place) !== placeKey("place" in this.state ? this.state.place : null);
     if (moved) {
@@ -454,3 +456,4 @@ export default class PullRequest extends View {
     return drawPane(this, Date.now());
   }
 }
+    this.tab ??= focused()?.tab ?? null;
