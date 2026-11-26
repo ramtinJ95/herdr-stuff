@@ -5,7 +5,8 @@ import { POLL, describeFailure, groups } from "./model.js";
 /** @typedef {import("./github.js").Failure} Failure */
 /** @typedef {ReturnType<typeof import("./model.js").summarize>} Summary */
 /** @typedef {ReturnType<typeof groups>[number]} Group */
-/** @typedef {{ kind: "group", key: string, group: Group, open: boolean } | { kind: "check", key: string, check: Check } | { kind: "hidden", key: string, count: number }} Row */
+/** @typedef {{ kind: "group", key: string, group: Group, open: boolean } | { kind: "check", key: string, check: Check } | { kind: "hidden", key: string, count: number } | { kind: "about", key: "about", open: boolean }} Row */
+/** @typedef {import("./github.js").About} About */
 /** @typedef {{ host: string, owner: string, name: string, number: number }} Target */
 
 export const PASSED_SHOWN = 8;
@@ -26,6 +27,9 @@ export function rowsOf(snapshot, folds) {
   });
   return snapshot.hidden > 0 ? [...rows, { kind: "hidden", key: "hidden", count: snapshot.hidden }] : rows;
 }
+
+/** The pane's rows: the description, then the checks. */
+export const paneRows = (snapshot, folds, aboutOpen) => /** @type {Row[]} */ ([{ kind: "about", key: "about", open: aboutOpen }, ...rowsOf(snapshot, folds)]);
 
 function indexOf(rows, key) {
   const own = rows.findIndex((r) => r.key === key);
@@ -104,3 +108,23 @@ export function ago(ms, now) {
 
 /** Whether what is shown is GitHub's latest answer: not a saved copy, not the last good one after a failed poll. */
 export const liveShown = (shown, trouble) => shown.source === "live" && trouble === null;
+
+const count = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/** Who opened the PR and when, and how much is on it. @param {About} about */
+export const aboutLine = (about, now) =>
+  [`${about.author ?? "A deleted account"} opened it ${ago(Date.parse(about.createdAt), now)}`, count(about.commits, "commit"), ...about.comments > 0 ? [count(about.comments, "comment")] : []].join(" · ");
+
+const REVIEW_WORDS = {
+  APPROVED: ["approved", "done"], CHANGES_REQUESTED: ["asked for changes", "blocked"], DISMISSED: ["review dismissed", "idle"],
+  COMMENTED: ["commented", "idle"], PENDING: ["is reviewing", "working"],
+};
+
+/** Each reviewer and where they stand, those who answered first. @param {About} about */
+export function reviewerWords(about) {
+  const who = (name) => name ?? "A reviewer GitHub does not name";
+  return [
+    ...about.reviews.map((r) => ({ text: `${who(r.who)} ${REVIEW_WORDS[r.state][0]}`, tone: REVIEW_WORDS[r.state][1] })),
+    ...about.asked.map((name) => ({ text: `${who(name)} is asked to review`, tone: "idle" })),
+  ];
+}

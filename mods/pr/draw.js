@@ -1,8 +1,8 @@
 import { div } from "gpui-kit";
-import { h_flex, v_flex } from "gpui-base";
+import { TextView, h_flex, v_flex } from "gpui-base";
 import { theme } from "herdr";
 import { duration, offersMerge, summarize } from "./model.js";
-import { ago, blockerWords, currentStep, failureLines, headlineOf, liveShown, rowsOf, selectedRow, stepLink } from "./view.js";
+import { aboutLine, ago, blockerWords, currentStep, failureLines, headlineOf, liveShown, paneRows, reviewerWords, selectedRow, stepLink } from "./view.js";
 import { armedLine } from "./merge.js";
 
 export const WIDE_PX = 720;
@@ -72,20 +72,23 @@ function snapshotView(app, t, s, now) {
   const { snapshot } = s.shown;
   const clock = s.shown.source === "replay" ? s.shown.fetchedAt : now;
   const sum = summarize(snapshot, { localHead: s.phase === "showing" ? s.localHead : null });
-  const rows = rowsOf(snapshot, app.folds);
+  const rows = paneRows(snapshot, app.folds, app.aboutOpen);
+  const checks = rows.length > 1;
   const selected = selectedRow(rows, app.selected);
   const open = selected?.kind === "check" ? selected.check : null;
   if (app.reveal && selected !== null) app.scroll.scroll_to_item(rows.indexOf(selected));
   app.reveal = false;
   const items = rows.flatMap((row) => {
     const drawn = rowView(app, t, row, row === selected, snapshot, clock);
+    // One child for the description and its heading, so a row's place in `rows` is its place in the list for scroll_to_item.
+    if (row.kind === "about") return [row.open ? v_flex().flex_none().child(drawn).child(aboutBlock(t, s, now)) : drawn];
     return !app.wide && app.expanded && row === selected && open !== null
       ? [drawn, div().id("details-under").ml(24).mr(12).my(4).rounded(6).bg(t.raised).child(details(app, t, open, s, clock))]
       : [drawn];
   });
   const list = v_flex().id("checks").flex_1().min_w(0).min_h(0).py(4).overflow_y_scrollbar().track_scroll(app.scroll)
-    .children(items.length > 0 ? items : [div().px(14).py(8).text_size(12).text_color(t.muted).child("No checks reported for this commit.")]);
-  const body = app.wide && rows.length > 0
+    .children(checks ? items : [...items, div().px(14).py(8).text_size(12).text_color(t.muted).child("No checks reported for this commit.")]);
+  const body = app.wide && checks
     ? h_flex().flex_1().min_h(0).items_start().child(list.h_full())
       .child(v_flex().id("details").flex_1().min_w(0).h_full().border_l_1().border_color(t.border).overflow_y_scrollbar()
         .child(open !== null ? details(app, t, open, s, clock)
@@ -153,6 +156,11 @@ function rowView(app, t, row, selected, snapshot, now) {
       .child(div().text_size(12).font_semibold().text_color(t.muted).child(row.group.title))
       .child(div().text_size(12).text_color(t.dim).child(String(row.group.checks.length)));
   }
+  if (row.kind === "about") {
+    return base.pl(14)
+      .child(div().w(10).flex_none().text_size(11).text_color(t.dim).child(row.open ? "▾" : "▸"))
+      .child(div().text_size(12).font_semibold().text_color(t.muted).child("Description"));
+  }
   if (row.kind === "hidden") {
     return base.pl(32).child(div().truncate().text_size(12).text_color(t.dim)
       .child(`${row.count} more check${row.count === 1 ? "" : "s"} GitHub did not return: open the PR's checks page`));
@@ -165,6 +173,24 @@ function rowView(app, t, row, selected, snapshot, now) {
     .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(step === null ? t.dim : t.muted).child(step ?? c.workflow ?? c.app ?? ""))
     .when(c.required, (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child("req")))
     .child(div().flex_none().w(52).text_right().text_size(11.5).text_color(t.dim).child(duration(c.startedAt, c.completedAt, now)));
+}
+
+function aboutBlock(t, s, now) {
+  const say = (text) => div().pl(32).pr(14).pb(8).text_size(12).text_color(t.dim).child(text);
+  if (s.phase === "replay") return say("A replay frame has no description.");
+  const about = s.phase === "showing" ? s.about : null;
+  if (about === null) return say(s.phase === "showing" && s.aboutError !== null ? `The description did not load: ${s.aboutError}` : "Reading the description…");
+  const reviewers = reviewerWords(about);
+  return v_flex().pl(32).pr(14).pb(10).gap(4)
+    .child(line(aboutLine(about, now), t.muted))
+    .when(reviewers.length > 0, (el) => el.child(h_flex().flex_wrap().gap_x(12).gap_y(2).children(reviewers.map((r) => h_flex().gap(5).items_center()
+      .child(div().w(6).h(6).flex_none().rounded_full().bg(toneInk(t, r.tone)))
+      .child(line(r.text, t.muted))))))
+    .when(about.labels.length > 0, (el) => el.child(h_flex().flex_wrap().gap(6).children(about.labels.map((label) =>
+      div().px(6).rounded(4).border_1().border_color(t.border).text_size(11).text_color(t.muted).child(label)))))
+    .when(s.aboutError !== null, (el) => el.child(line(`It did not refresh: ${s.aboutError}`, t.dim)))
+    .child(about.body.trim() === "" ? line("No description.", t.dim)
+      : div().pt(4).min_w(0).child(TextView.markdown("about-body", about.body).selectable(true).text_size(12.5)));
 }
 
 function details(app, t, c, s, now) {

@@ -1,15 +1,16 @@
 import { View } from "gpui-kit";
 import { ScrollHandle } from "gpui-base";
-import { checking, exec, focused, nextCommand, panes, props, readTextFile, settings, spaces, window as appWindow } from "herdr";
-import { prArgs, stepsArgs } from "./query.js";
-import { classifyFailure, classifyRejection, mergeSteps, parseLookup, parsePr, prLookupArgs } from "./github.js";
+import { checking, exec, focused, nextCommand, panes, props, readTextFile, run, settings, spaces, window as appWindow } from "herdr";
+import { aboutArgs, prArgs, stepsArgs } from "./query.js";
+import { classifyFailure, classifyRejection, mergeSteps, parseAbout, parseLookup, parsePr, prLookupArgs } from "./github.js";
 import { nextPollDelay, offersMerge, stepsWanted, summarize } from "./model.js";
-import { liveShown, moveSelection, resetAtOf, rowsOf, selectedRow } from "./view.js";
+import { liveShown, moveSelection, paneRows, resetAtOf, selectedRow } from "./view.js";
 import { armedHolds, confirmMerge, mergeMethod, mergePress, repoViewArgs } from "./merge.js";
 import { WIDE_PX, drawPane } from "./draw.js";
 
 /** @typedef {import("./github.js").Snapshot} Snapshot */
 /** @typedef {import("./github.js").Failure} Failure */
+/** @typedef {import("./github.js").About} About */
 /** @typedef {import("./view.js").Target} Target */
 /** @typedef {import("./merge.js").MergeMethod} MergeMethod */
 /** @typedef {import("./merge.js").MergeUi} MergeUi */
@@ -22,7 +23,7 @@ import { WIDE_PX, drawPane } from "./draw.js";
  *   | { phase: "locating", place: Place, shown: Shown | null }
  *   | { phase: "failed", place: Place, trouble: Trouble }
  *   | { phase: "no-pr", place: Place }
- *   | { phase: "showing", place: Place, target: Target, localHead: string | null, methods: Methods, shown: Shown | null, trouble: Trouble | null, stepsError: string | null }
+ *   | { phase: "showing", place: Place, target: Target, localHead: string | null, methods: Methods, shown: Shown | null, trouble: Trouble | null, stepsError: string | null, about: About | null, aboutError: string | null }
  *   | { phase: "replay", file: string, shown: Shown | null, trouble: Trouble | null }} State
  */
 
@@ -33,11 +34,12 @@ const CACHE_KEPT = 20;
 const PLACES_KEPT = 50;
 const CACHE_ORDER = "pr:v1:order";
 const PLACES = "pr:v1:places";
+const ABOUT_OPEN = "pr:v1:about-open";
 const cacheKey = (target) => `pr:v1:${target.host}/${target.owner}/${target.name}#${target.number}`;
 const placeKey = (place) => (place === null ? null : JSON.stringify([place.machine, place.cwd, place.branch]));
 const after = (ms) => (ms === null ? null : Date.now() + ms);
 const IDLE = /** @type {MergeUi} */ ({ step: "idle" });
-const KEYS = { j: "down", down: "down", k: "up", up: "up", enter: "toggle", space: "toggle", o: "open", r: "refresh", m: "merge", escape: "escape" };
+const KEYS = { j: "down", down: "down", k: "up", up: "up", enter: "toggle", space: "toggle", o: "open", r: "refresh", m: "merge", escape: "escape", q: "close" };
 /** What `herdr-app do pr.<action>` may do. Merge is not among them: it takes two presses in the pane, by someone looking at it. */
 const ACTIONS = new Set(Object.values(KEYS).filter((action) => action !== "merge"));
 
@@ -59,6 +61,7 @@ export default class PullRequest extends View {
     this.resetAt = null;
     this.selected = null;
     this.folds = new Map();
+    this.aboutOpen = this.saved(ABOUT_OPEN, true) === true;
     this.expanded = false;
     this.wide = false;
     this.reveal = false;
@@ -73,7 +76,7 @@ export default class PullRequest extends View {
       for (;;) {
         const command = await nextCommand();
         if (command === "focus") this.handle.focus();
-        else if (ACTIONS.has(command)) {
+        else if (ACTIONS.has(command) && focused()?.tab === this.tab) {
           this.disarm(cx);
           this.act(command, cx);
         }
@@ -173,7 +176,7 @@ export default class PullRequest extends View {
       return cx.notify();
     }
     this.remember(place, target);
-    this.state = { phase: "showing", place, target, localHead, methods: { ask: "unasked" }, shown: this.cached(target), trouble: null, stepsError: null };
+    this.state = { phase: "showing", place, target, localHead, methods: { ask: "unasked" }, shown: this.cached(target), trouble: null, stepsError: null, about: null, aboutError: null };
     cx.notify();
     await this.poll(cx, gen);
   }
@@ -216,6 +219,7 @@ export default class PullRequest extends View {
     this.land(target, { ...s, localHead, trouble: null, ...steps === null ? { snapshot, stepsError: null } : this.withSteps(snapshot, steps) });
     this.due = after(nextPollDelay({ ciKind: sum.ci.kind, prState: snapshot.pr.state, visible: true, error: null }));
     cx.notify();
+    const about = this.readAbout(cx, gen);
     const late = stepsWanted(snapshot, this.detailId(), STEPS_MAX).filter((id) => !wanted.includes(id));
     if (late.length > 0 && (was.shown === null || late.includes(this.detailId()))) {
       const more = await this.gh(stepsArgs(late, target.host), place);
@@ -225,6 +229,24 @@ export default class PullRequest extends View {
       cx.notify();
     }
     if (offersMerge(sum) && s.methods.ask !== "known") await this.askMethods(cx, gen);
+    await about;
+  }
+
+  /** Reads what a person wrote on the PR, when there is none yet or the PR has changed since. */
+  async readAbout(cx, gen) {
+    const was = /** @type {Extract<State, { phase: "showing" }>} */ (this.state);
+    if (was.about !== null && was.about.updatedAt === was.shown.snapshot.pr.updatedAt) return;
+    const { target, place } = was;
+    const r = await this.gh(aboutArgs(target.owner, target.name, target.number, target.host), place);
+    if (gen !== this.gen) return;
+    const now = /** @type {Extract<State, { phase: "showing" }>} */ (this.state);
+    try {
+      if (r.failure !== null) throw new Error(r.failure.text);
+      this.state = { ...now, about: parseAbout(JSON.parse(r.stdout)), aboutError: null };
+    } catch (e) {
+      this.state = { ...now, aboutError: (e instanceof Error ? e.message : String(e)).split("\n")[0] };
+    }
+    cx.notify();
   }
 
   land(target, { snapshot, ...rest }) {
@@ -309,7 +331,7 @@ export default class PullRequest extends View {
 
   rows() {
     const snapshot = this.snapshot();
-    return snapshot === null ? [] : rowsOf(snapshot, this.folds);
+    return snapshot === null ? [] : paneRows(snapshot, this.folds, this.aboutOpen);
   }
 
   detailId() {
@@ -334,6 +356,10 @@ export default class PullRequest extends View {
 
   clickRow(cx, row) {
     if (row.kind === "group") this.folds.set(row.group.key, !row.open);
+    if (row.kind === "about") {
+      this.aboutOpen = !row.open;
+      localStorage.setItem(ABOUT_OPEN, JSON.stringify(this.aboutOpen));
+    }
     if (row.kind === "hidden") this.openChecksPage();
     if (row.kind === "check") this.expanded = row.key === selectedRow(this.rows(), this.selected)?.key ? !this.expanded : true;
     this.select(row.key);
@@ -361,13 +387,23 @@ export default class PullRequest extends View {
       this.wantSteps();
     } else if (action === "open" && row !== null) {
       if (row.kind === "check" && row.check.link !== null) this.openUrl(row.check.link);
+      else if (row.kind === "about") this.openUrl(this.snapshot().pr.url);
       else this.openChecksPage();
     } else if (action === "refresh") {
       this.refresh(cx);
     } else if (action === "escape") {
       this.expanded = false;
+    } else if (action === "close") {
+      this.close();
     }
     cx.notify();
+  }
+
+  /** Closes this pane: the focused one of this mod in its tab, else the only one. */
+  close() {
+    const mine = panes().filter((p) => p.mod === "pr" && p.tab === this.tab);
+    const pane = (mine.find((p) => p.focused) ?? mine[0])?.pane;
+    if (pane !== undefined) run("pane.close", { pane });
   }
 
   disarm(cx) {
@@ -452,8 +488,8 @@ export default class PullRequest extends View {
   }
 
   render(cx) {
+    this.tab ??= focused()?.tab ?? null;
     this.track(cx);
     return drawPane(this, Date.now());
   }
 }
-    this.tab ??= focused()?.tab ?? null;

@@ -39,6 +39,23 @@ query($ids: [ID!]!) {
   nodes(ids: $ids) { ... on CheckRun { id steps(first: 60) ${STEP_FIELDS} } }
 }`;
 
+/** What a person wrote and who is on it. None of it moves with CI, so the pane asks again only when the PR's `updatedAt` moves. */
+export const ABOUT_QUERY = `
+query($owner: String!, $name: String!, $number: Int!) {
+  rateLimit { cost remaining }
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      body createdAt updatedAt
+      author { login }
+      labels(first: 20) { nodes { name } }
+      latestOpinionatedReviews(first: 20) { nodes { state author { login } } }
+      reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on Actor { login } ... on Team { name } } } }
+      comments { totalCount }
+      commits { totalCount }
+    }
+  }
+}`;
+
 export const OPEN_PRS_QUERY = `
 query($owner: String!, $name: String!) {
   rateLimit { cost remaining }
@@ -51,6 +68,10 @@ query($owner: String!, $name: String!) {
 
 export function prArgs(owner, name, number, steps, host = "github.com") {
   return ["api", "graphql", "--hostname", host, "-f", `query=${PR_QUERY}`, "-F", `owner=${owner}`, "-F", `name=${name}`, "-F", `number=${number}`, "-F", `steps=${steps}`];
+}
+
+export function aboutArgs(owner, name, number, host = "github.com") {
+  return ["api", "graphql", "--hostname", host, "-f", `query=${ABOUT_QUERY}`, "-F", `owner=${owner}`, "-F", `name=${name}`, "-F", `number=${number}`];
 }
 
 /** The args for the steps of these check runs. GitHub rejects an empty list, so this throws on one. */

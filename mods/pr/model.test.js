@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
-import { GhError, classifyFailure, classifyRejection, mergeSteps, parseLookup, parsePr, prLookupArgs } from "./github.js";
+import { GhError, classifyFailure, classifyRejection, mergeSteps, parseAbout, parseLookup, parsePr, prLookupArgs } from "./github.js";
 import { POLL, describeFailure, duration, groups, nextPollDelay, offersMerge, stepsWanted, summarize } from "./model.js";
 import { stepsArgs } from "./query.js";
 
@@ -382,4 +382,36 @@ test("duration", () => {
   assert.equal(duration("2026-11-26T18:00:00Z", "2026-11-26T19:05:10Z", 0), "1h 5m");
   assert.equal(duration("2026-11-26T18:00:00Z", null, Date.parse("2026-11-26T18:02:00Z")), "2m 0s");
   assert.equal(duration(null, null, 0), "");
+});
+
+const aboutAnswer = () => JSON.parse(readFileSync(join(fixtures, "about-first-game-146.json"), "utf8"));
+
+test("a recorded ABOUT_QUERY answer reads as who wrote what, when, with its counts", () => {
+  const about = parseAbout(aboutAnswer());
+  assert.equal(about.author, "ramtinJ95");
+  assert.equal(about.createdAt, "2026-11-26T16:39:28Z");
+  assert.equal(about.updatedAt, "2026-11-26T18:38:40Z");
+  assert.equal(about.body.length, 3696);
+  assert.deepEqual([about.labels, about.reviews, about.asked, about.comments, about.commits], [[], [], [], 0, 4]);
+});
+
+test("synthetic: labels, reviews and asked reviewers read by name; a deleted author and an unnamed team read as null", () => {
+  const raw = aboutAnswer();
+  Object.assign(raw.data.repository.pullRequest, {
+    author: null, labels: { nodes: [{ name: "external" }] },
+    latestOpinionatedReviews: { nodes: [{ state: "APPROVED", author: { login: "ada" } }, { state: "CHANGES_REQUESTED", author: null }] },
+    reviewRequests: { nodes: [{ requestedReviewer: { __typename: "User", login: "cy" } }, { requestedReviewer: { __typename: "Team", name: "core" } }, { requestedReviewer: null }] },
+  });
+  const about = parseAbout(raw);
+  assert.equal(about.author, null);
+  assert.deepEqual(about.labels, ["external"]);
+  assert.deepEqual(about.reviews, [{ who: "ada", state: "APPROVED" }, { who: null, state: "CHANGES_REQUESTED" }]);
+  assert.deepEqual(about.asked, ["cy", "core", null]);
+});
+
+test("synthetic: an ABOUT_QUERY answer with errors or a field this pane does not read is a GhError", () => {
+  assert.throws(() => parseAbout({ data: null, errors: [{ type: "RATE_LIMITED", message: "API rate limit exceeded" }] }), (e) => e instanceof GhError && e.kind === "rate-limited");
+  const raw = aboutAnswer();
+  raw.data.repository.pullRequest.latestOpinionatedReviews = { nodes: [{ state: "SHRUGGED", author: { login: "ada" } }] };
+  assert.throws(() => parseAbout(raw), (e) => e instanceof GhError && /SHRUGGED/.test(e.text));
 });

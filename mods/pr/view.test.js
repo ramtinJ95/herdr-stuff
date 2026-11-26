@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { summarize } from "./model.js";
-import { ago, blockerWords, currentStep, failureLines, headlineOf, liveShown, moveSelection, resetAtOf, rowsOf, selectedRow, stepLink } from "./view.js";
+import { aboutLine, ago, blockerWords, currentStep, failureLines, headlineOf, liveShown, moveSelection, paneRows, resetAtOf, reviewerWords, rowsOf, selectedRow, stepLink } from "./view.js";
 
 let ids = 0;
 const check = (bucket, extra = {}) => ({
@@ -106,4 +106,33 @@ test("what is shown is live only as GitHub's latest answer: not a saved copy, no
   assert.equal(liveShown({ source: "live" }, null), true);
   assert.equal(liveShown({ source: "cache" }, null), false);
   assert.equal(liveShown({ source: "live" }, { failure: { kind: "offline", text: "x" }, streak: 1 }), false);
+});
+
+test("the description is the pane's first row, and the selection still starts on the first check", () => {
+  const rows = paneRows(snapshot([check("fail"), check("pass")]), new Map(), true);
+  assert.deepEqual(rows[0], { kind: "about", key: "about", open: true });
+  assert.equal(selectedRow(rows, null), rows[2]);
+  assert.equal(moveSelection(rows, rows[2].key, -5), "about");
+  const alone = paneRows(snapshot([]), new Map(), false);
+  assert.deepEqual(alone, [{ kind: "about", key: "about", open: false }]);
+  assert.equal(selectedRow(alone, null), alone[0]);
+});
+
+const about = (extra = {}) => ({
+  body: "", author: "ramtinJ95", createdAt: "2026-11-26T16:00:00Z", updatedAt: "2026-11-26T18:00:00Z", labels: [], reviews: [], asked: [], comments: 0, commits: 1, ...extra,
+});
+
+test("the description's first line says who opened it, when, and how much is on it", () => {
+  const now = Date.parse("2026-11-26T19:00:00Z");
+  assert.equal(aboutLine(about(), now), "ramtinJ95 opened it 3 h ago · 1 commit");
+  assert.equal(aboutLine(about({ author: null, commits: 4, comments: 2 }), now), "A deleted account opened it 3 h ago · 4 commits · 2 comments");
+});
+
+test("reviewers who answered come first with where they stand, then those still asked", () => {
+  const words = reviewerWords(about({ reviews: [{ who: "ada", state: "APPROVED" }, { who: "bo", state: "CHANGES_REQUESTED" }], asked: ["cy", null] }));
+  assert.deepEqual(words, [
+    { text: "ada approved", tone: "done" }, { text: "bo asked for changes", tone: "blocked" },
+    { text: "cy is asked to review", tone: "idle" }, { text: "A reviewer GitHub does not name is asked to review", tone: "idle" },
+  ]);
+  assert.deepEqual(reviewerWords(about()), []);
 });

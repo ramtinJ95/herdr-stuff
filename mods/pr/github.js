@@ -12,7 +12,14 @@
  *   headRef: string, baseRef: string, fork: boolean, mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN",
  *   mergeState: "CLEAN" | "HAS_HOOKS" | "UNSTABLE" | "BLOCKED" | "BEHIND" | "DIRTY" | "DRAFT" | "UNKNOWN",
  *   review: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null, unresolvedThreads: number, additions: number,
- *   deletions: number, files: number }, checks: Check[], hidden: number, rateLimit: { cost: number, remaining: number } | null }} Snapshot
+ *   deletions: number, files: number, updatedAt: string }, checks: Check[], hidden: number, rateLimit: { cost: number, remaining: number } | null }} Snapshot
+ */
+
+/**
+ * What a person wrote on a PR and who is on it. `asked` holds the reviewers asked who have not answered; null is one GitHub does not name.
+ * @typedef {{ body: string, author: string | null, createdAt: string, updatedAt: string, labels: string[],
+ *   reviews: { who: string | null, state: "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED" | "COMMENTED" | "PENDING" }[],
+ *   asked: (string | null)[], comments: number, commits: number }} About
  */
 
 /** A failure thrown by the parsers here; `kind` is a FailureKind. */
@@ -39,6 +46,7 @@ const PR_STATES = ["OPEN", "CLOSED", "MERGED"];
 const MERGEABLE = ["MERGEABLE", "CONFLICTING", "UNKNOWN"];
 const MERGE_STATES = ["CLEAN", "HAS_HOOKS", "UNSTABLE", "BLOCKED", "BEHIND", "DIRTY", "DRAFT", "UNKNOWN"];
 const REVIEWS = ["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", null];
+const REVIEW_STATES = ["APPROVED", "CHANGES_REQUESTED", "DISMISSED", "COMMENTED", "PENDING"];
 
 const unread = (path, value) => {
   throw new GhError("unknown", `GitHub answered ${JSON.stringify(value)} at ${path}, which this pane does not read`);
@@ -147,10 +155,36 @@ export function parsePr(raw) {
       mergeState: oneOf(MERGE_STATES)(p.mergeStateStatus, at("mergeStateStatus")), review: oneOf(REVIEWS)(p.reviewDecision, at("reviewDecision")),
       unresolvedThreads: threads.filter((t, i) => !bool(t.isResolved, at(`reviewThreads.nodes[${i}].isResolved`))).length,
       additions: int(p.additions, at("additions")), deletions: int(p.deletions, at("deletions")), files: int(p.changedFiles, at("changedFiles")),
+      updatedAt: str(p.updatedAt, at("updatedAt")),
     },
     checks: latestOnly(nodes.map((n, i) => context(obj(n, `contexts.nodes[${i}]`), `contexts.nodes[${i}]`))).sort(displayOrder),
     hidden: contexts === null ? 0 : int(contexts.totalCount, "statusCheckRollup.contexts.totalCount") - nodes.length,
     rateLimit: limit === null ? null : { cost: int(obj(limit, "rateLimit").cost, "rateLimit.cost"), remaining: int(limit.remaining, "rateLimit.remaining") },
+  };
+}
+
+/**
+ * The About in an ABOUT_QUERY answer. Throws a GhError as `parsePr` does. An account GitHub deleted answers a null author,
+ * and a team the person may not see a null reviewer.
+ * @returns {About}
+ */
+export function parseAbout(raw) {
+  if (Array.isArray(raw?.errors) && raw.errors.length > 0) throw failureOf(raw.errors);
+  const p = obj(obj(obj(raw?.data, "data").repository, "data.repository").pullRequest, "data.repository.pullRequest");
+  const at = (field) => `pullRequest.${field}`;
+  const nodes = (field) => list(obj(p[field], at(field)).nodes, at(`${field}.nodes`));
+  const count = (field) => int(obj(p[field], at(field)).totalCount, at(`${field}.totalCount`));
+  const named = (actor, path) => (actor === null ? null : str(obj(actor, path).login ?? actor.name, path));
+  return {
+    body: str(p.body, at("body")), author: named(p.author, at("author")),
+    createdAt: str(p.createdAt, at("createdAt")), updatedAt: str(p.updatedAt, at("updatedAt")),
+    labels: nodes("labels").map((l, i) => str(obj(l, at(`labels.nodes[${i}]`)).name, at(`labels.nodes[${i}].name`))),
+    reviews: nodes("latestOpinionatedReviews").map((r, i) => {
+      const path = at(`latestOpinionatedReviews.nodes[${i}]`);
+      return { who: named(obj(r, path).author, `${path}.author`), state: oneOf(REVIEW_STATES)(r.state, `${path}.state`) };
+    }),
+    asked: nodes("reviewRequests").map((r, i) => named(obj(r, at(`reviewRequests.nodes[${i}]`)).requestedReviewer, at(`reviewRequests.nodes[${i}].requestedReviewer`))),
+    comments: count("comments"), commits: count("commits"),
   };
 }
 

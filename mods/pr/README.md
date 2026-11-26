@@ -4,6 +4,7 @@ A [Herdr app](https://herdr.dev) mod that shows the pull request of the branch y
 
 - its stage: no pull request yet, draft, open, merged or closed;
 - whether it can merge, and what blocks it: a draft, conflicts, behind the base branch, a review, required checks, a branch rule;
+- its description, with who opened it and when, its reviewers and where each stands, its labels, and how many commits and comments it has;
 - every check, grouped as failed, running, cancelled, passed and skipped, with the step a running GitHub Actions job is on;
 - the steps of the check you select, beside the list when the pane is 720 px or wider and under the row when it is narrower;
 - Merge, when GitHub reports the pull request clean.
@@ -16,7 +17,7 @@ It needs the [GitHub CLI](https://cli.github.com) (`gh`), logged in.
 ln -s "$PWD/herdr-stuff/mods/pr" ~/.config/herdr-app/mods/pr
 ```
 
-Merge `keys.json` into `~/.config/herdr-app/keys.json`. **Ctrl-f o** splits the focused pane to the right with the pull request pane. The command palette has it as **Pull request**.
+Merge `keys.json` into `~/.config/herdr-app/keys.json`. **Ctrl-f o** splits the focused pane to the right with the pull request pane, and **Ctrl-f Shift-o** closes the one in the tab you are in, from any pane. The command palette has the first as **Pull request**.
 
 ## Which pull request
 
@@ -29,11 +30,16 @@ With no pull request for the branch, it says so and looks again every 30 seconds
 | Key | Does |
 | --- | --- |
 | j, k, arrows | Move the selection |
-| Enter, Space | Open or close a group, or show a check's steps |
+| Enter, Space | Open or close the description or a group, or show a check's steps |
 | o | Open the selected check, or the pull request, on GitHub |
 | r | Refresh now |
 | m | Merge: the first press says what will happen, the second does it. A held key does neither |
 | Esc | Take back the first press of Merge |
+| q | Close the pane |
+
+## Description
+
+The first row is the description, drawn as Markdown, open until you close it; the pane remembers which. Its comments are counted, not shown: `o` on the row opens the pull request on GitHub.
 
 ## Merge
 
@@ -51,6 +57,7 @@ There is no `pr.merge` command: `herdr-app do` and key bindings cannot merge.
 ## When it asks GitHub
 
 - Every 10 seconds while checks run, every 60 seconds for an open pull request whose checks have settled, never for a merged or closed one. `POLL` in `model.js` holds the delays.
+- The description on the first look, and again only when the pull request's `updatedAt` moves: an edit, a comment, a review, a push. One more call of 1 point, about 0.5 s.
 - Not at all while the window is hidden or the pane's tab is not the one shown. It asks at once when the tab shows again.
 - Each poll is one query, plus one for the steps of up to 6 running jobs. Each costs 1 point of GitHub's 5,000 an hour. A pane left visible on a running pull request uses about 650 an hour.
 - It opens on the last answer it saw for that pull request, marked with its age, and replaces it when the fresh one lands.
@@ -75,8 +82,8 @@ It draws with `theme()` and the terminal palette (`ansi1`, `ansi2`, `ansi3`) for
 
 The pane asks `gh` about the pull request for the branch checked out in a folder. It reads the answers in three files, and `merge.js` holds the one thing it changes.
 
-- `query.js` holds the GraphQL that the pane and `record.js` share. `PR_QUERY` is the poll. It asks for steps only with `$steps`, because steps make a poll about three times slower. `STEPS_QUERY` asks for the steps of a few check runs by node id. `prArgs` and `stepsArgs` build the `gh api graphql` arguments.
-- `github.js` is the boundary. `parsePr` turns a `PR_QUERY` answer into a `Snapshot` and throws a `GhError` with a `kind` when the answer has errors or a field it does not read. `mergeSteps` sets the steps from a `STEPS_QUERY` answer on a snapshot. `prLookupArgs` and `parseLookup` find the pull request for a folder's branch with `gh pr view`. `classifyFailure` names what went wrong from a non-zero exit, and `classifyRejection` does the same for a rejected `exec` or a `GhError`.
+- `query.js` holds the GraphQL that the pane and `record.js` share. `PR_QUERY` is the poll. It asks for steps only with `$steps`, because steps make a poll about three times slower. `STEPS_QUERY` asks for the steps of a few check runs by node id. `ABOUT_QUERY` asks for the description, author, labels and reviewers, apart from the poll because none of it moves with CI. `prArgs`, `stepsArgs` and `aboutArgs` build the `gh api graphql` arguments.
+- `github.js` is the boundary. `parsePr` turns a `PR_QUERY` answer into a `Snapshot` and throws a `GhError` with a `kind` when the answer has errors or a field it does not read. `mergeSteps` sets the steps from a `STEPS_QUERY` answer on a snapshot. `parseAbout` turns an `ABOUT_QUERY` answer into an `About`. `prLookupArgs` and `parseLookup` find the pull request for a folder's branch with `gh pr view`. `classifyFailure` names what went wrong from a non-zero exit, and `classifyRejection` does the same for a rejected `exec` or a `GhError`.
 - `model.js` is pure. `summarize` gives the stage, the CI state, what blocks the merge, the headline and its tone. `groups` gives the check rows in display order. `stepsWanted` picks the checks to ask steps for. `nextPollDelay` reads the `POLL` table. `offersMerge` says whether the pane offers Merge. `describeFailure` gives the line for a failure. `duration` formats elapsed time.
 - `merge.js` is Merge. `mergePress` says what a press does and `armedHolds` whether the first press still stands, both pure. `confirmMerge` is the second press: it takes the function that runs `gh`, so `merge.test.js` runs it against a recorded answer and a stand-in for `gh pr merge`.
 
