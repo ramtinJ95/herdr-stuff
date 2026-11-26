@@ -112,12 +112,16 @@ function header(app, t, s, sum, now) {
     .children(mergeRow(app, t, now));
 }
 
-function mergeButton(t, text, look, press) {
+/** A press on the button is not a press on the pane, which would take back the first press of Merge; it still gives the pane the keyboard, so `m` can be the second. */
+function mergeButton(app, t, text, look) {
   return h_flex().id("merge").h(26).px(10).items_center().rounded(6).flex_none().text_size(12)
     .border_1().border_color(look === "armed" ? t.solid : t.input).bg(look === "armed" ? t.solid : t.raised)
     .text_color(look === "armed" ? t.solid_foreground : t.foreground)
-    .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-    .when(look !== "off", (el) => el.cursor_pointer().hover((x) => x.opacity(0.85)).on_click((_e, cx) => press(cx)))
+    .on_mouse_down("left", (_e, cx) => {
+      app.handle.focus();
+      cx.stop_propagation();
+    })
+    .when(look !== "off", (el) => el.cursor_pointer().hover((x) => x.opacity(0.85)).on_click((_e, cx) => app.pressMerge(cx)))
     .when(look === "off", (el) => el.opacity(0.45))
     .child(text);
 }
@@ -130,7 +134,7 @@ function mergeRow(app, t, now) {
   const row = (...children) => [h_flex().pl(17).pt(5).gap(10).items_center().children(children)];
   if (offer.look === "note") return row(line(offer.note, t.muted));
   const note = "note" in offer && offer.note !== null ? [line(offer.note, offer.look === "armed" ? t.foreground : t.dim)] : [];
-  return row(mergeButton(t, offer.label, offer.look, (cx) => app.pressMerge(cx)), ...note);
+  return row(mergeButton(app, t, offer.label, offer.look), ...note);
 }
 
 function rowView(app, t, row, selected, now) {

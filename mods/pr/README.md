@@ -37,6 +37,8 @@ With no pull request for the branch, it says so and looks again every 30 seconds
 | Esc | Take back the first press of Merge |
 | q | Close the pane |
 
+The pane has the keyboard once it opens, and again when you click in it, on Merge too, or move onto it.
+
 ## Description
 
 The first row is the description, drawn as Markdown, open until you close it; the pane remembers which. Its comments are counted, not shown: `o` on the row opens the pull request on GitHub.

@@ -457,6 +457,18 @@ export default class PullRequest extends View {
     cx.notify();
   }
 
+  /**
+   * The first draw. A pane just split off is Herdr's focused pane, yet nothing hands it the keyboard: "focus" comes
+   * only from pane.go. Taking it during this draw does not hold, so it is taken right after.
+   */
+  opened(cx) {
+    this.tab = focused()?.tab ?? null;
+    if (this.tab === null) return;
+    cx.timer.after(0, () => {
+      if (panes().some((p) => p.mod === "pr" && p.tab === this.tab && p.focused)) this.handle.focus();
+    });
+  }
+
   resized(size, cx) {
     const wide = size.width / Number(settings().zoom ?? 1) >= WIDE_PX;
     if (wide === this.wide) return;
@@ -466,7 +478,7 @@ export default class PullRequest extends View {
   }
 
   render(cx) {
-    this.tab ??= focused()?.tab ?? null;
+    if (this.tab === null) this.opened(cx);
     this.track(cx);
     return drawPane(this, Date.now());
   }
