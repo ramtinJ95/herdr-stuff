@@ -34,7 +34,7 @@ export const EMPTY = { annotations: [], nextId: 1 };
 export const REVIEW_KEYS = {
   j: "down", down: "down", k: "up", up: "up", d: "half-down", u: "half-up", g: "first", b: "last", "shift-g": "last", v: "range",
   c: "comment", s: "suggestion", i: "issue", a: "question", o: "overall", h: "previous", l: "next", r: "edit", x: "delete", y: "finish",
-  enter: "confirm", n: "next-file", p: "previous-file", escape: "escape", q: "close",
+  enter: "confirm", n: "next-file", p: "previous-file", w: "window", escape: "escape", q: "close",
 };
 const MOVES = { down: () => 1, up: () => -1, "half-down": (page) => page, "half-up": (page) => -page, first: () => -Infinity, last: () => Infinity };
 

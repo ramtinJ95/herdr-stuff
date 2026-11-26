@@ -1,16 +1,16 @@
 import { View } from "gpui-kit";
 import { InputState, ScrollHandle, VirtualListScrollHandle } from "gpui-base";
-import { appHome, checking, exec, focused, hc, nextCommand, panes, props, readTextFile, run, settings, spaces, window as appWindow } from "herdr";
+import { appHome, checking, closeOverlay, exec, focused, hc, nextCommand, openOverlay, panes, props, readTextFile, run, setShared, settings, shared, spaces, window as appWindow } from "herdr";
 import * as fs from "fs/promises";
 import { aboutArgs, filesArgs, prArgs, stepsArgs } from "./query.js";
 import { classifyFailure, classifyRejection, firstLine, frameAnswer, mergeSteps, parseAbout, parseFiles, parseLookup, parsePin, parsePr, prLookupArgs, readAnswer } from "./github.js";
 import { failureDelay, keepSteps, nextPollDelay, offersMerge, plural, stepsWanted, summarize, troubleAfter } from "./model.js";
 import { liveShown, moveSelection, paneRows, rowUrl, selectedRow } from "./view.js";
-import { coloursOf, diffOf, helperInput, noColours, plainNote } from "./diff.js";
+import { coloursOf, diffOf, helperInput, noColours, plainNote, rowLines } from "./diff.js";
 import { confirmMerge, mergeMethod, mergeOffer, mergePress } from "./merge.js";
 import { EMPTY, KINDS, REVIEW_KEYS, activeAnnotation, agentOf, annotatedRows, dropAnnotation, formatQuestion, formatReview, isMove, markAsked, moveCursor, saveDraft,
   sendResult, sortAnnotations, stepAnnotation, stretch, targetOf, toSend } from "./review.js";
-import { WIDE_PX, drawPane, lineHeight } from "./draw.js";
+import { WIDE_PX, drawPane, lineHeight, wrapColumns } from "./draw.js";
 
 /** @typedef {import("./github.js").Snapshot} Snapshot */
 /** @typedef {import("./github.js").About} About */
@@ -48,26 +48,49 @@ const CACHE_KEPT = 20;
 const PLACES_KEPT = 50;
 const CACHE_ORDER = "pr:v1:order";
 const PLACES = "pr:v1:places";
-const ABOUT_OPEN = "pr:v1:about-open";
-const FILES_OPEN = "pr:v1:files-open";
-const cacheKey = (target) => `pr:v1:${target.host}/${target.owner}/${target.name}#${target.number}`;
-const reviewKey = (target) => `pr:v1:review:${target.host}/${target.owner}/${target.name}#${target.number}`;
+/** A pull request's name in what is stored. GitHub reads an owner and a repository in any case, so one case is kept. */
+const prKey = (target) => `${target.host}/${target.owner}/${target.name}#${target.number}`.toLowerCase();
+const cacheKey = (target) => `pr:v1:${prKey(target)}`;
+/**
+ * What every copy of the pane agrees on is in Herdr's shared state. localStorage is one store per mod and props, so a
+ * pane that follows its tab, a pane pinned to a pull request and a window each have their own: it holds only the cache.
+ */
+const VIEW = "pr.view";
+const REVIEWS = "pr.reviews";
+/** Which of Description and Files are open. @returns {{ aboutOpen: boolean, filesOpen: boolean }} */
+const view = () => ({ aboutOpen: true, filesOpen: false, .../** @type {object} */ (shared(VIEW) ?? {}) });
+/** The annotations on each pull request, by `prKey`. @returns {Record<string, import("./review.js").Review>} */
+const reviews = () => /** @type {any} */ (shared(REVIEWS) ?? {});
 const placeKey = (place) => (place === null ? null : JSON.stringify([place.machine, place.cwd, place.branch]));
 const after = (ms) => (ms === null ? null : Date.now() + ms);
 const save = (key, value) => localStorage.setItem(key, JSON.stringify(value));
 const IDLE = /** @type {MergeUi} */ ({ step: "idle" });
-const KEYS = { j: "down", down: "down", k: "up", up: "up", enter: "toggle", space: "toggle", l: "read", right: "read", o: "open", r: "refresh", escape: "escape", q: "close" };
+const KEYS = { j: "down", down: "down", k: "up", up: "up", enter: "toggle", space: "toggle", l: "read", right: "read", o: "open", r: "refresh", w: "window", escape: "escape", q: "close" };
 /** What `herdr-app do pr.<command>` and key bindings may do. Merge is not here: it takes two presses in the pane, by someone looking at it. */
-const COMMANDS = new Set(["down", "up", "toggle", "read", "open", "refresh", "escape", "close"]);
+const COMMANDS = new Set(["down", "up", "toggle", "read", "open", "refresh", "window", "escape", "close"]);
 /** The same, while the keyboard is in a diff. */
 const READ_COMMANDS = new Set(Object.values(REVIEW_KEYS));
+/** The copies of this mod that float in a window. While there is one, the commands are its own: a pane under it leaves them be. */
+const WINDOWS = new Set();
+/**
+ * What a pane has loaded of the pull request it opens a window on, and its place in the diff, for the window to start
+ * from in place of asking GitHub again. Module code is shared by a mod's copies; the window takes it as it starts.
+ * @type {{ key: string, shown: Shown, reading: { path: string, cursor: number, anchor: number | null } | null } | null}
+ */
+let handed = null;
 
 export default class PullRequest extends View {
   init(_props, cx) {
     // Set by the first draw: a pane is drawn only while its tab is the one shown, and init also runs for a pane in another tab.
     /** @type {string | null} */
     this.tab = null;
-    const { replay = null, pr = null } = props() ?? {};
+    const { replay = null, pr = null, overlay = null, follow = null, file = null } = props() ?? {};
+    /** The window this copy floats in, when a pane opened it there with `w`; null in a pane. @type {string | null} */
+    this.overlay = overlay;
+    /** What a window opens on: the file its pane had selected, and what the pane handed it. */
+    this.first = file === null ? null : `file:${file}`;
+    this.handed = overlay === null ? null : handed;
+    if (overlay !== null) handed = null;
     /** @type {State} */
     this.state = replay === null ? { phase: "idle" } : { phase: "replay", file: replay, shown: null, trouble: null };
     /** The pull request this pane was given to show, in place of the one its tab is on. @type {Target | null} */
@@ -81,7 +104,7 @@ export default class PullRequest extends View {
     }
     /** @type {MergeUi} */
     this.merge = IDLE;
-    this.follow = null;
+    this.follow = follow;
     this.gen = 0;
     /** When the next poll or lookup is due, in ms; null is "not until asked". */
     this.due = null;
@@ -92,17 +115,17 @@ export default class PullRequest extends View {
     this.resetAt = null;
     this.selected = null;
     this.folds = new Map();
-    this.aboutOpen = this.saved(ABOUT_OPEN, true) === true;
-    this.filesOpen = this.saved(FILES_OPEN, false) === true;
     /** The diff last drawn, parsed once, and why it is plain when it is. @type {({ key: string, path: string, why: string | null } & ReturnType<typeof diffOf>) | null} */
     this.diffed = null;
-    this.expanded = false;
+    this.expanded = file !== null;
     this.wide = false;
     this.handle = cx.focus_handle();
     this.scroll = ScrollHandle.new();
-    /** The annotations on the pull request shown, as localStorage has them under `reviewKey`. @type {import("./review.js").Review} */
+    /** The annotations on the pull request shown, as the shared state has them under `reviewKey`. @type {import("./review.js").Review} */
     this.review = EMPTY;
     this.reviewKey = null;
+    /** The stored text `review` was read from. */
+    this.reviewStored = null;
     /** The keyboard's place in the diff of the file at `path`; null while it is in the list. @type {{ path: string, cursor: number, anchor: number | null } | null} */
     this.reading = null;
     /** The annotation being typed in the field. @type {import("./review.js").Draft | null} */
@@ -116,9 +139,13 @@ export default class PullRequest extends View {
     /** What is on its way to the agent: the ids of questions, and "review" for the review. */
     this.sending = new Set();
     this.shift = false;
+    /** A press began on a window's header, which it is dragged by. */
+    this.grip = false;
     /** The diff's rows with the annotations among them, laid out once per diff and review. */
     this.listed = null;
     this.lines = VirtualListScrollHandle.new();
+    /** The width the diff is drawn at, in px; null until it has been drawn once. */
+    this.diffWidth = null;
     this.input = InputState.new({ placeholder: "" });
     this.input.on("submit", (_e, cx) => this.submit(cx));
     this.input.on("focus", (_e, cx) => {
@@ -130,6 +157,7 @@ export default class PullRequest extends View {
       cx.notify();
     });
     if (checking()) return;
+    if (overlay !== null) WINDOWS.add(this);
     if (replay !== null) cx.spawn(async (cx) => this.readReplay(cx, replay));
     cx.timer.every(TICK_MS, (cx) => {
       if (this.track(cx)) cx.notify();
@@ -138,7 +166,7 @@ export default class PullRequest extends View {
       for (;;) {
         const command = await nextCommand();
         if (command === "focus") this.handle.focus();
-        else if (focused()?.tab === this.tab) {
+        else if (focused()?.tab === this.tab && (this.overlay !== null || WINDOWS.size === 0)) {
           if (this.reader() !== null && READ_COMMANDS.has(command)) this.readAct(command, cx);
           else if (COMMANDS.has(command)) {
             this.disarm(cx);
@@ -171,7 +199,9 @@ export default class PullRequest extends View {
 
   /** @returns {Showing} */
   opening(place, target) {
-    return { phase: "showing", place, target, localHead: null, method: undefined, shown: this.cached(target), trouble: null, stepsError: null, aboutError: null, filesError: null };
+    // What a pane handed its window is shown as a cached copy is: at once, and not to be acted on until GitHub has answered here.
+    const shown = this.handed?.key === prKey(target) ? { ...this.handed.shown, source: /** @type {const} */ ("cache") } : this.cached(target);
+    return { phase: "showing", place, target, localHead: null, method: undefined, shown, trouble: null, stepsError: null, aboutError: null, filesError: null };
   }
 
   track(cx) {
@@ -182,11 +212,15 @@ export default class PullRequest extends View {
       this.gen++;
       this.state = place === null ? { phase: "idle" } : this.pin === null ? { phase: "locating", place, shown: this.guess(place) } : this.opening(place, this.pin);
       this.merge = IDLE;
-      this.selected = null;
+      this.selected = this.first;
+      this.first = null;
       this.folds = new Map();
       this.more = false;
       this.due = Date.now();
       this.leave();
+      if (this.handed !== null && "target" in this.state && this.handed.key === prKey(this.state.target)) this.reading = this.handed.reading;
+      this.handed = null;
+      this.scroll.scroll_to_item(Math.max(0, this.rows().findIndex((r) => r.key === this.selected)));
     }
     const lapsed = this.merge.step === "armed" && this.offer(Date.now()).look !== "armed";
     if (lapsed) this.merge = IDLE;
@@ -335,8 +369,9 @@ export default class PullRequest extends View {
     const { snapshot, about, files } = was.shown;
     const missing = stepsWanted(snapshot, this.detailId(), STEPS_MAX)
       .filter((id) => !asked.includes(id) && snapshot.checks.find((c) => c.id === id).steps === null);
-    const behind = this.aboutOpen && about?.updatedAt !== snapshot.pr.updatedAt;
-    const moved = this.filesOpen && files?.head !== snapshot.pr.head;
+    const { aboutOpen, filesOpen } = view();
+    const behind = aboutOpen && about?.updatedAt !== snapshot.pr.updatedAt;
+    const moved = filesOpen && files?.head !== snapshot.pr.head;
     if (missing.length === 0 && !behind && !moved) return;
     const [steps, read, listed] = await Promise.all([
       missing.length === 0 ? null : this.gh(stepsArgs(missing, target.host), place),
@@ -450,7 +485,7 @@ export default class PullRequest extends View {
   rows() {
     const shown = "shown" in this.state ? this.state.shown : null;
     if (shown === null) return [];
-    return paneRows(shown.snapshot, { folds: this.folds, aboutOpen: this.aboutOpen, filesOpen: this.filesOpen, files: shown.files?.list ?? null });
+    return paneRows(shown.snapshot, { folds: this.folds, ...view(), files: shown.files?.list ?? null });
   }
 
   /** The file whose diff is drawn: the selected one, beside the list in a wide pane, in place of it once opened in a narrow one. @returns {File | null} */
@@ -486,14 +521,8 @@ export default class PullRequest extends View {
   clickRow(cx, row) {
     this.leave();
     if (row.kind === "group") this.folds.set(row.group.key, !row.open);
-    if (row.kind === "about") {
-      this.aboutOpen = !row.open;
-      save(ABOUT_OPEN, this.aboutOpen);
-    }
-    if (row.kind === "files") {
-      this.filesOpen = !row.open;
-      save(FILES_OPEN, this.filesOpen);
-    }
+    if (row.kind === "about") setShared(VIEW, { ...view(), aboutOpen: !row.open });
+    if (row.kind === "files") setShared(VIEW, { ...view(), filesOpen: !row.open });
     if (row.kind === "hidden" || row.kind === "more-files") cx.open_url(rowUrl(row, this.snapshot()));
     if (row.kind === "check" || row.kind === "file") this.expanded = row.key === selectedRow(this.rows(), this.selected)?.key ? !this.expanded : true;
     this.select(row.key);
@@ -546,6 +575,8 @@ export default class PullRequest extends View {
       this.refresh(cx);
     } else if (action === "escape") {
       this.expanded = false;
+    } else if (action === "window") {
+      this.popOut();
     } else if (action === "close") {
       this.closePane();
     }
@@ -574,42 +605,63 @@ export default class PullRequest extends View {
     this.handle.focus();
   }
 
-  /** The annotations on the pull request shown, read from localStorage as it becomes the one shown. */
+  /**
+   * The annotations on the pull request shown. Every copy on the same pull request writes them to the shared state, so
+   * they are read again whenever what is there is no longer what was read; the same object is kept while it is.
+   */
   notes() {
     if (this.state.phase !== "showing") return EMPTY;
-    const key = reviewKey(this.state.target);
-    if (this.reviewKey !== key) {
+    const key = prKey(this.state.target);
+    const stored = JSON.stringify(reviews()[key] ?? EMPTY);
+    if (this.reviewKey !== key || this.reviewStored !== stored) {
       this.reviewKey = key;
-      this.review = this.saved(key, EMPTY);
+      this.reviewStored = stored;
+      this.review = JSON.parse(stored);
     }
     return this.review;
   }
 
-  /** The review saved under `key`: the one shown, unless the pane has since left that pull request. */
+  /** The review saved under `key`: that of the pull request the send was for, which the pane may have left since. */
   reviewAt(key) {
-    return key === this.reviewKey ? this.review : this.saved(key, EMPTY);
+    return reviews()[key] ?? EMPTY;
   }
 
   keep(review, key = this.reviewKey) {
-    if (key === this.reviewKey) this.review = review;
-    save(key, review);
+    setShared(REVIEWS, { ...reviews(), [key]: review });
   }
 
   /** A file's diff with the annotations among its lines. */
   listing(file) {
-    const { rows } = this.diff(file);
+    const { rows, digits } = this.diff(file);
     const { annotations } = this.notes();
-    if (this.listed?.rows !== rows || this.listed.annotations !== annotations) {
-      this.listed = { rows, annotations, ...annotatedRows(rows, annotations, file.path, /** @type {Showing} */ (this.state).shown.files.head) };
+    const columns = wrapColumns(this.diffWidth, digits), height = lineHeight();
+    const was = this.listed;
+    if (was?.rows !== rows || was.annotations !== annotations || was.columns !== columns || was.height !== height) {
+      const laid = annotatedRows(rows, annotations, file.path, /** @type {Showing} */ (this.state).shown.files.head);
+      // A row is as high as the lines its text folds into at this width; `tops` is where each starts.
+      const sizes = laid.items.map((item) => (item.type === "line" ? rowLines(item.row, columns) : 1) * height);
+      let end = 0;
+      const tops = sizes.map((size) => (end += size) - size);
+      this.listed = { rows, annotations, columns, height, ...laid, sizes, tops };
     }
     return this.listed;
   }
 
-  /** Brings the cursor's line on screen when it is off it. Every row of the list is one line high. */
+  /** The diff's width as it is drawn, which its lines fold at. The cursor's line is kept on screen as they fold anew. */
+  diffResized(size, cx) {
+    const width = Math.round(size.width / Number(settings().zoom ?? 1));
+    if (width === this.diffWidth) return;
+    this.diffWidth = width;
+    const file = this.detailFile();
+    if (file !== null && this.reader() !== null) this.reveal(file);
+    cx.notify();
+  }
+
+  /** Brings the cursor's row on screen when part of it is off it. */
   reveal(file) {
-    const item = this.listing(file).at[this.reading.cursor];
-    const height = lineHeight(), top = this.lines.offset().y;
-    if (item * height < top || (item + 1) * height > top + this.lines.viewport_size().height) this.lines.scroll_to_item(item, "center");
+    const { at, tops, sizes } = this.listing(file);
+    const item = at[this.reading.cursor], top = this.lines.offset().y;
+    if (tops[item] < top || tops[item] + sizes[item] > top + this.lines.viewport_size().height) this.lines.scroll_to_item(item, "center");
   }
 
   /** The pull request as the agent is told of it, while a diff of it is read. @returns {import("./review.js").Subject} */
@@ -683,6 +735,8 @@ export default class PullRequest extends View {
         this.leave();
         if (!this.wide) this.expanded = false;
       }
+    } else if (action === "window") {
+      this.popOut();
     } else if (action === "close") {
       this.closePane();
     }
@@ -823,6 +877,7 @@ export default class PullRequest extends View {
    * Not named `close`: Herdr calls a view's `close` as the pane goes, and this would then take a second pane with it.
    */
   closePane() {
+    if (this.overlay !== null) return void closeOverlay(this.overlay);
     const mine = panes().filter((p) => p.mod === "pr" && p.tab === this.tab);
     const pane = (mine.find((p) => p.focused) ?? mine[0])?.pane;
     if (pane !== undefined) run("pane.close", { pane });
@@ -837,6 +892,9 @@ export default class PullRequest extends View {
   pressed(cx) {
     this.handle.focus();
     this.disarm(cx);
+    // Herdr drags a window by any press its mod does not stop. Only the header's is let through: it sets `grip` on its way up.
+    if (this.overlay !== null && !this.grip) cx.stop_propagation();
+    this.grip = false;
   }
 
   refresh(cx) {
@@ -889,8 +947,31 @@ export default class PullRequest extends View {
     this.tab = focused()?.tab ?? null;
     if (this.tab === null) return;
     cx.timer.after(0, () => {
-      if (panes().some((p) => p.mod === "pr" && p.tab === this.tab && p.focused)) this.handle.focus();
+      if (this.overlay !== null || panes().some((p) => p.mod === "pr" && p.tab === this.tab && p.focused)) this.handle.focus();
     });
+  }
+
+  /**
+   * `w`: opens the pull request shown in a window that floats over the layout, most of the app's size, on the file
+   * selected. The pane stays as it is; the annotations are the same ones, kept per pull request.
+   */
+  popOut() {
+    if (this.state.phase !== "showing" || this.state.shown === null || this.overlay !== null) return;
+    const { target, shown } = this.state;
+    const row = selectedRow(this.rows(), this.selected);
+    const reading = this.reader();
+    // Files whose colours are still on their way are left out: the window reads them itself, colours and all.
+    handed = { key: prKey(target), shown: shown.files?.colours === undefined ? { ...shown, files: null } : shown, reading: reading === null ? null : { ...reading } };
+    openOverlay({
+      mod: "pr", kind: "window", key: "pr", width: 0.94, height: 0.92,
+      // The pull request as this pane names it, so that the window's is the same one in what is stored.
+      props: { pr: `https://${target.host}/${target.owner}/${target.name}/pull/${target.number}`, follow: this.follow, file: row?.kind === "file" ? row.file.path : null },
+    });
+  }
+
+  /** Herdr's last call as the pane or window goes. */
+  async close() {
+    WINDOWS.delete(this);
   }
 
   resized(size, cx) {
