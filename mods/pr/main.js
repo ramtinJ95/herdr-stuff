@@ -57,8 +57,8 @@ const cacheKey = (target) => `pr:v1:${prKey(target)}`;
  */
 const VIEW = "pr.view";
 const REVIEWS = "pr.reviews";
-/** Which of Description and Files are open. @returns {{ aboutOpen: boolean, filesOpen: boolean }} */
-const view = () => ({ aboutOpen: true, filesOpen: false, .../** @type {object} */ (shared(VIEW) ?? {}) });
+/** Which of Description and Files are open, and the list's width beside a diff or a check's steps. @returns {{ aboutOpen: boolean, filesOpen: boolean, listWidth: number }} */
+const view = () => ({ aboutOpen: true, filesOpen: false, listWidth: 320, .../** @type {object} */ (shared(VIEW) ?? {}) });
 /** The annotations on each pull request, by `prKey`. @returns {Record<string, import("./review.js").Review>} */
 const reviews = () => /** @type {any} */ (shared(REVIEWS) ?? {});
 const placeKey = (place) => (place === null ? null : JSON.stringify([place.machine, place.cwd, place.branch]));
@@ -168,10 +168,7 @@ export default class PullRequest extends View {
         if (command === "focus") this.handle.focus();
         else if (focused()?.tab === this.tab && (this.overlay !== null || WINDOWS.size === 0)) {
           if (this.reader() !== null && READ_COMMANDS.has(command)) this.readAct(command, cx);
-          else if (COMMANDS.has(command)) {
-            this.disarm(cx);
-            this.act(command, cx);
-          }
+          else if (COMMANDS.has(command)) this.listAct(command, cx);
         }
         cx.notify();
       }
@@ -220,7 +217,8 @@ export default class PullRequest extends View {
       this.leave();
       if (this.handed !== null && "target" in this.state && this.handed.key === prKey(this.state.target)) this.reading = this.handed.reading;
       this.handed = null;
-      this.scroll.scroll_to_item(Math.max(0, this.rows().findIndex((r) => r.key === this.selected)));
+      // The row a window opens on is brought into view once the list has been drawn: before that there is nothing to scroll.
+      cx.timer.after(0, () => this.scroll.scroll_to_item(Math.max(0, this.rows().findIndex((r) => r.key === this.selected))));
     }
     const lapsed = this.merge.step === "armed" && this.offer(Date.now()).look !== "armed";
     if (lapsed) this.merge = IDLE;
@@ -545,12 +543,17 @@ export default class PullRequest extends View {
     } else if (e.keystroke === "m") {
       this.pressMerge(cx, e.is_held === true);
     } else {
-      this.disarm(cx);
       const action = KEYS[e.keystroke];
-      if (action === undefined) return;
-      this.act(action, cx);
+      if (action === undefined) return void this.disarm(cx);
+      this.listAct(action, cx);
     }
     cx.stop_propagation();
+  }
+
+  /** An action while the keyboard is in the list. Any of them takes back Merge's first press, and Esc then does no more. */
+  listAct(action, cx) {
+    if (this.disarm(cx) && action === "escape") return;
+    this.act(action, cx);
   }
 
   act(action, cx) {
@@ -574,7 +577,9 @@ export default class PullRequest extends View {
     } else if (action === "refresh") {
       this.refresh(cx);
     } else if (action === "escape") {
-      this.expanded = false;
+      // Esc leaves what a narrow pane shows in place of its list. With nothing to leave, a window closes.
+      if (this.overlay !== null && (this.wide || !this.expanded)) this.closePane();
+      else this.expanded = false;
     } else if (action === "window") {
       this.popOut();
     } else if (action === "close") {
@@ -883,10 +888,22 @@ export default class PullRequest extends View {
     if (pane !== undefined) run("pane.close", { pane });
   }
 
+  /** Takes back Merge's first press, or the line on how a merge went. Says whether there was one. */
   disarm(cx) {
-    if (this.merge.step !== "armed" && this.merge.step !== "done") return;
+    if (this.merge.step !== "armed" && this.merge.step !== "done") return false;
     this.merge = IDLE;
     cx.notify();
+    return true;
+  }
+
+  /** The list's width beside a diff or a check's steps, as it was last dragged to. */
+  listWidth() {
+    return view().listWidth;
+  }
+
+  /** A drag of the divider has ended: the list's width is kept for the next pane or window. */
+  splitResized(sizes) {
+    setShared(VIEW, { ...view(), listWidth: Math.round(sizes[0]) });
   }
 
   pressed(cx) {

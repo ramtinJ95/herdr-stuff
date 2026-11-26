@@ -54,10 +54,12 @@ A pinned pane does not follow its tab, names its repository in the header beside
 | r | Refresh now |
 | w | Open the pull request in a window over the layout: see Window |
 | m | Merge: the first press says what will happen, the second does it. A held key does neither |
-| Esc | Take back the first press of Merge; in a narrow pane, leave a diff or a check's steps for the list |
+| Esc | Take back the first press of Merge; in a narrow pane, leave a diff or a check's steps for the list; in a window, close it |
 | q | Close the pane, or the window |
 
 The pane has the keyboard once it opens, and again when you click in it, on Merge too, or move onto it.
+
+In a wide pane and in the window, the line between the list and what stands beside it drags. The list's width is remembered, and a new pane or window starts at the width last dragged to.
 
 ## Description
 
@@ -75,7 +77,7 @@ A line longer than the diff is wide folds at its edge, as a terminal folds it, s
 
 ## Window
 
-`w` opens the pull request in a window that floats over the layout, 94% of the app wide and 92% high, on the file and the line you were at. It starts from what the pane has already read, so it is there at once, with Merge off until GitHub has answered it too. Everything works in it as in the pane, and a review goes to the same agent. Its header drags it; `q` or the ✕ closes it, and the pane under it is as you left it. While it is open the `pr.<command>`s are its own.
+`w` opens the pull request in a window that floats over the layout, 94% of the app wide and 92% high, on the file and the line you were at. It starts from what the pane has already read, so it is there at once, with Merge off until GitHub has answered it too. Everything works in it as in the pane, and a review goes to the same agent. Its header drags it; `q`, the ✕ or Esc closes it, and the pane under it is as you left it. Esc first gives up what is half done, then leaves the diff for the list, so from a diff it closes on the second press. While it is open the `pr.<command>`s are its own.
 
 ## Review
 
@@ -95,7 +97,7 @@ Enter or `l` on a file puts the keyboard in its diff, and a click on a line does
 | n, p | The next or previous file |
 | w | Open this diff in a window, at this line |
 | y, then Enter | Send every comment, suggestion and issue to the agent as one review. They leave the pane once sent |
-| Esc | Give up the field, the range, then the diff, one at a time |
+| Esc | Give up the field, the range, then the diff, one at a time; in a window, once more closes it |
 
 An annotation is typed on one line in a field under the diff: Enter keeps it, Esc or an empty field gives it up. It then stands under the last line it covers, its lines carry its mark in the gutter, and the file's row counts it. The bar under the diff shows the one the cursor is on in full.
 
@@ -157,7 +159,7 @@ The pane asks `gh` about the pull request for the branch checked out in a folder
 - `pierre/highlight.mjs` is the helper, for node and not for Herdr. It gives Pierre each file's diff under a theme whose colours only name roles (`ROLES` in `diff.js`), and prints each line as spans of role, text and whether that part changed. Its answer is the same in every theme. `pierre/highlight.test.js` runs it as the pane does, on the recorded answer, and is skipped where the package is not installed.
 - `model.js` is pure. `summarize` gives the stage, the CI state, what blocks the merge, the headline and its tone. `groups` gives the check rows in display order. `stepsWanted` picks the checks to ask steps for, and `keepSteps` carries a finished job's steps into the next poll's snapshot. `nextPollDelay` and `failureDelay` read the `POLL` table. `offersMerge` says whether the pane offers Merge. `describeFailure` gives the line for a failure. `duration` formats elapsed time.
 - `review.js` is the review, pure. `targetOf` names a stretch of a diff's rows and quotes them; `saveDraft`, `dropAnnotation` and `markAsked` change the annotations; `annotatedRows` lays them among a file's lines; `formatReview` and `formatQuestion` are what the agent is sent; `agentOf` picks the terminal and refuses a shell; `sendResult` reads how `hc send` went. `main.js` keeps the cursor, the field and the sends.
-- What is stored is in two places. Herdr keeps one `localStorage` per mod and props, so a following pane, each pinned pane and the window have their own: it holds only the cache of the last answer. What all of them must agree on is in Herdr's shared state: the annotations (`pr.reviews`) and which of Description and Files are open (`pr.view`).
+- What is stored is in two places. Herdr keeps one `localStorage` per mod and props, so a following pane, each pinned pane and the window have their own: it holds only the cache of the last answer. What all of them must agree on is in Herdr's shared state: the annotations (`pr.reviews`), and which of Description and Files are open and the list's width (`pr.view`).
 - `merge.js` is Merge. `mergeOffer` is the one reading of it: no button, a note, the button off, at rest or armed. The row is drawn from that offer and `mergePress` says what a press does to it, both pure. `confirmMerge` is the second press: it takes the function that runs `gh`, so `merge.test.js` runs it against a recorded answer and a stand-in for `gh pr merge`.
 
 The checks follow the GitHub CLI's own rules from `gh pr checks` (`aggregate.go`, `output.go` in cli/cli). A check's state is its conclusion when completed, else its status, and the state maps to a bucket: `pass`, `fail`, `pending`, `skipping` or `cancel`. `STARTUP_FAILURE`, `STALE` and any state gh does not list count as `pending`, as in gh. Re-runs are removed as gh removes them: latest start first, then the first check per status context, or per name, workflow and event. The CI kind is the first of `fail`, `pending` and `cancel` with a check in it, else `pass`, or `none` with no checks. It counts the required checks when the PR has any, and all checks otherwise. `ci.all` always counts all of them, so an optional failure stays visible.

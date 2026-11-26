@@ -1,5 +1,5 @@
 import { div } from "gpui-kit";
-import { Input, Scrollbar, TextView, h_flex, v_flex, v_virtual_list } from "gpui-base";
+import { Input, Scrollbar, TextView, h_flex, h_resizable, resizable_panel, v_flex, v_virtual_list } from "gpui-base";
 import { settings, theme } from "herdr";
 import { CUT_COLUMNS, ROLES, cutSpans, rowNumber, wrapSpans } from "./diff.js";
 import { duration, hasSteps, plural, summarize } from "./model.js";
@@ -7,6 +7,8 @@ import { KINDS, activeAnnotation, askWords, countByPath, stretch, toSend } from 
 import { aboutLine, ago, blockerWords, currentStep, failureLines, headlineOf, liveShown, reviewerWords, selectedRow, stepLink } from "./view.js";
 
 export const WIDE_PX = 720;
+/** The narrowest the list is dragged to beside a diff or a check's steps, in px. */
+const LIST_MIN_PX = 160;
 
 const GLYPHS = { pass: "✓", fail: "✕", pending: "●", skipping: "–", cancel: "⊘" };
 const waiting = (item) => item.bucket === "pending" && item.startedAt === null;
@@ -92,12 +94,16 @@ function snapshotView(app, t, s, now) {
   const list = v_flex().id("checks").min_w(0).min_h(0).py(4).overflow_y_scrollbar().track_scroll(app.scroll)
     .children(rows.some((r) => CHECK_ROWS.includes(r.kind)) ? items : [...items, line("No checks reported for this commit.", t.muted).px(14).py(8)]);
   if (!app.wide || !rows.some((r) => CHECK_ROWS.includes(r.kind) || r.kind === "file")) return pane.child(list.flex_1());
-  const side = file !== null ? div().flex_1().min_w(0).h_full().border_l_1().border_color(t.border).child(diffPane(app, t, file))
-    : v_flex().id("details").flex_1().min_w(0).h_full().border_l_1().border_color(t.border).overflow_y_scrollbar()
+  const side = file !== null ? div().size_full().min_w(0).child(diffPane(app, t, file))
+    : v_flex().id("details").size_full().min_w(0).overflow_y_scrollbar()
       .child(check !== null ? details(t, check, s, clock) : line("Select a check to see its steps, or a file to see its diff.", t.dim).p(12));
-  // Beside a diff the list gives up width: the diff is what is being read.
-  return pane.child(h_flex().flex_1().min_h(0).items_start()
-    .child(file !== null ? div().h_full().flex_none().w_1_3().min_w(260).child(list.size_full()) : list.h_full().flex_1()).child(side));
+  // The divider between the two is dragged. Herdr keeps where it was left under the group's name, so a pane and a
+  // window, which differ in width, each have their own; the width it starts at is the one last dragged to anywhere.
+  // The group has no size of its own: the room that is left is given to it.
+  return pane.child(h_resizable(app.overlay === null ? "pr-split" : "pr-split-window").flex_1().min_h(0)
+    .on_resize((sizes) => app.splitResized(sizes))
+    .child(resizable_panel().size(app.listWidth()).size_range(LIST_MIN_PX).child(list.size_full()))
+    .child(resizable_panel().child(side)));
 }
 
 function header(app, t, s, sum, now) {
@@ -243,7 +249,7 @@ const HINTS = ["v range", "c comment", "s suggestion", "i issue", "a ask", "o on
 /** One file's diff, filling the space it is given, with what is noted on it among its lines and the review's bar under it. */
 function diffPane(app, t, file) {
   const reading = app.reader();
-  const hint = reading !== null ? "Esc for the list" : app.wide ? "Enter to annotate" : "Enter to annotate · Esc for the list";
+  const hint = reading !== null ? "Esc for the list" : !app.wide ? "Enter to annotate · Esc for the list" : app.overlay !== null ? "Enter to annotate · Esc closes" : "Enter to annotate";
   const top = h_flex().flex_none().h(30).px(12).gap(8).items_center().border_b_1().border_color(t.border)
     .child(fileMark(t, file))
     .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(file.previous === null ? file.path : `${file.previous} → ${file.path}`))
