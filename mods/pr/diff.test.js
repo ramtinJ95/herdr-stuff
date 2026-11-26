@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { GhError, parseFiles } from "./github.js";
-import { coloursOf, cutSpans, diffOf, helperInput, noColours, paintRows, patchRows, plainNote, rowNumber, untabSpans } from "./diff.js";
+import { CUT_COLUMNS, coloursOf, cutSpans, diffOf, helperInput, noColours, paintRows, patchRows, plainNote, rowLines, rowNumber, untabSpans, wrapSpans } from "./diff.js";
 import { fixtures } from "./recorded.js";
 
 /** What `gh api repos/ramtinJ95/first-game/pulls/146/files --paginate --slurp` printed. */
@@ -149,4 +149,27 @@ test("synthetic: a plain diff says why, and says nothing while the helper has no
   assert.equal(plainNote(colours, "b.js", false), "No syntax colours for this file: odd");
   assert.equal(plainNote(colours, "c.js", false), "No syntax colours for this file: the helper did not answer for it.");
   assert.equal(plainNote(noColours("No syntax colours: node did not run. x"), "a.js", false), "No syntax colours: node did not run. x");
+});
+
+test("synthetic: a long line folds at the pane's edge, wherever that falls, and each part keeps its colour and mark", () => {
+  assert.deepEqual(wrapSpans([[4, "abc", 0], [0, "defgh", 1]], 4), [[[4, "abc", 0], [0, "d", 1]], [[0, "efgh", 1]]]);
+  assert.deepEqual(wrapSpans([[0, "abcdefghij", 0]], 4), [[[0, "abcd", 0]], [[0, "efgh", 0]], [[0, "ij", 0]]]);
+});
+
+test("synthetic: a line with no text is still one line, and a line that ends at the edge has no empty line after it", () => {
+  assert.deepEqual(wrapSpans([], 4), [[]]);
+  assert.deepEqual(wrapSpans([[0, "", 0]], 4), [[]]);
+  assert.deepEqual(wrapSpans([[0, "abcd", 0], [1, "efgh", 0]], 4), [[[0, "abcd", 0]], [[1, "efgh", 0]]]);
+});
+
+test("every recorded row takes as many lines as its cut text folds into, and a hunk header or a note takes one", () => {
+  const rows = filesAnswer().flat().filter((file) => file.patch).flatMap((file) => patchRows(file.patch));
+  assert.ok(rows.some((row) => row.text.length > 40), "the recording has lines that fold");
+  for (const columns of [20, 40, 97, CUT_COLUMNS]) {
+    for (const row of rows) {
+      const folded = row.kind === "hunk" || row.kind === "note" ? 1 : wrapSpans(cutSpans([[0, row.text, 0]], CUT_COLUMNS), columns).length;
+      assert.equal(rowLines(row, columns), folded, `${row.kind} row of ${row.text.length} characters at ${columns}`);
+    }
+  }
+  assert.equal(rowLines({ kind: "add", old: null, new: 1, text: "x".repeat(CUT_COLUMNS * 3) }, 100), CUT_COLUMNS / 100);
 });

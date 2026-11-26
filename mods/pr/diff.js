@@ -115,6 +115,38 @@ export function cutSpans(spans, columns) {
   return kept;
 }
 
+/** The columns of a line that are drawn: a longer line is cut. */
+export const CUT_COLUMNS = 400;
+
+/**
+ * Spans folded into lines of `columns` characters, as a terminal folds a long line: at the edge, wherever that falls.
+ * There is always a first line, empty for no text.
+ * @param {Span[]} spans @returns {Span[][]}
+ */
+export function wrapSpans(spans, columns) {
+  /** @type {Span[][]} */
+  const lines = [[]];
+  let room = columns;
+  for (const [role, text, changed] of spans) {
+    let rest = text;
+    while (rest.length > 0) {
+      if (room === 0) {
+        lines.push([]);
+        room = columns;
+      }
+      const part = rest.slice(0, room);
+      lines.at(-1).push([role, part, changed]);
+      room -= part.length;
+      rest = rest.slice(part.length);
+    }
+  }
+  return lines;
+}
+
+/** How many lines of `columns` characters a row is drawn in: as many as `wrapSpans` folds its cut text into. @param {DiffRow} row */
+export const rowLines = (row, columns) =>
+  (row.kind === "hunk" || row.kind === "note" ? 1 : Math.max(1, Math.ceil(Math.min(row.text.length, CUT_COLUMNS) / columns)));
+
 /**
  * What the helper said of a pull request's files: each file's lines by path, or for a file it could not read the reason,
  * and in `note` why there are no colours at all, when it did not run.
