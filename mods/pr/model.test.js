@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { GhError, classifyFailure, classifyRejection, frameAnswer, mergeSteps, parseAbout, parseLookup, parsePr, prLookupArgs } from "./github.js";
+import { GhError, classifyFailure, classifyRejection, frameAnswer, mergeSteps, parseAbout, parseLookup, parsePin, parsePr, prLookupArgs } from "./github.js";
 import { POLL, describeFailure, duration, failureDelay, groups, keepSteps, nextPollDelay, offersMerge, stepsWanted, summarize, troubleAfter } from "./model.js";
 import { stepsArgs } from "./query.js";
 import { FAILED, PASSED, PENDING, RUNNING, SETTLED, committed, fixtures, frame, recordings, snapshotOf } from "./recorded.js";
@@ -319,6 +319,17 @@ test("the lookup gives where the PR lives, from its URL", () => {
   assert.throws(() => parseLookup("not json"), (e) => e instanceof GhError && e.kind === "unknown");
   assert.deepEqual(prLookupArgs().slice(0, 2), ["pr", "view"]);
   assert.ok(prLookupArgs().at(-1).split(",").includes("url"));
+});
+
+test("a pinned pull request is named owner/name#number, or by its URL with or without a page under it", () => {
+  const cli = { host: "github.com", owner: "cli", name: "cli", number: 9000 };
+  assert.deepEqual(parsePin("cli/cli#9000"), cli);
+  assert.deepEqual(parsePin(" https://github.com/cli/cli/pull/9000 "), cli);
+  assert.deepEqual(parsePin("https://github.com/cli/cli/pull/9000/files#diff-1"), cli);
+  assert.deepEqual(parsePin("https://ghe.example.com/team/my.app/pull/7?w=1"), { host: "ghe.example.com", owner: "team", name: "my.app", number: 7 });
+  for (const bad of ["9000", "cli/cli", "cli/cli#x", "https://github.com/cli/cli/issues/9000", 9000, null]) {
+    assert.throws(() => parsePin(bad), (e) => e instanceof GhError && e.kind === "unknown" && /owner\/name#number/.test(e.text), String(bad));
+  }
 });
 
 test("the steps query passes each id as one entry of the ids list, and refuses none", () => {

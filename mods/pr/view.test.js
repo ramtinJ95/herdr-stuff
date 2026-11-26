@@ -92,6 +92,13 @@ test("each failure says what went wrong and, where there is one, the fix", () =>
   assert.equal(failureLines({ kind: "no-repo", text: "failed to run git: fatal: not a git repository" }, null, now).fix, null);
 });
 
+test("a pinned pane names its pull request where a following pane says this branch", () => {
+  assert.equal(failureLines({ kind: "no-pr", text: "x" }, null, 0).headline, "No pull request for this branch");
+  assert.equal(failureLines({ kind: "no-pr", text: "x" }, null, 0, "cli/cli#999999").headline, "No pull request cli/cli#999999");
+  assert.equal(failureLines({ kind: "no-repo", text: "x" }, null, 0, "o/gone#1").headline, "gh cannot see the repository of o/gone#1");
+  assert.equal(failureLines({ kind: "offline", text: "x" }, null, 0, "cli/cli#1").headline, "Cannot reach GitHub");
+});
+
 test("o opens the selected check's page, the pull request from its description, else the pull request's checks", () => {
   const linked = check("fail"), bare = check("fail", { link: null });
   const s = snapshot([linked, bare], { hidden: 3 });
