@@ -1,11 +1,12 @@
 import { View } from "gpui-kit";
 import { ScrollHandle } from "gpui-base";
-import { checking, exec, focused, nextCommand, panes, props, readTextFile, run, settings, spaces, window as appWindow } from "herdr";
+import { appHome, checking, exec, focused, nextCommand, panes, props, readTextFile, run, settings, spaces, window as appWindow } from "herdr";
+import * as fs from "fs/promises";
 import { aboutArgs, filesArgs, prArgs, stepsArgs } from "./query.js";
 import { classifyFailure, classifyRejection, firstLine, frameAnswer, mergeSteps, parseAbout, parseFiles, parseLookup, parsePin, parsePr, prLookupArgs, readAnswer } from "./github.js";
 import { failureDelay, keepSteps, nextPollDelay, offersMerge, stepsWanted, summarize, troubleAfter } from "./model.js";
 import { liveShown, moveSelection, paneRows, rowUrl, selectedRow } from "./view.js";
-import { diffOf } from "./diff.js";
+import { coloursOf, diffOf, helperInput, noColours, plainNote } from "./diff.js";
 import { confirmMerge, mergeMethod, mergeOffer, mergePress } from "./merge.js";
 import { WIDE_PX, drawPane } from "./draw.js";
 
@@ -20,7 +21,7 @@ import { WIDE_PX, drawPane } from "./draw.js";
 /**
  * What is drawn of a pull request: the poll's snapshot, and the description and the files read apart from it.
  * `files` are those of the head commit named beside them, and are not saved.
- * @typedef {{ snapshot: Snapshot, about: About | null, files: { head: string, list: File[] } | null, fetchedAt: number, source: "cache" | "live" | "replay" }} Shown
+ * @typedef {{ snapshot: Snapshot, about: About | null, files: { head: string, list: File[], colours?: import("./diff.js").Colours } | null, fetchedAt: number, source: "cache" | "live" | "replay" }} Shown
  */
 /**
  * `method` is undefined until GitHub has answered with the repository's merge methods.
@@ -40,6 +41,7 @@ import { WIDE_PX, drawPane } from "./draw.js";
 const TICK_MS = 1_000;
 const STEPS_MAX = 6;
 const GH_TIMEOUT_MS = 20_000;
+const HELPER_TIMEOUT_MS = 60_000;
 const CACHE_KEPT = 20;
 const PLACES_KEPT = 50;
 const CACHE_ORDER = "pr:v1:order";
@@ -87,7 +89,7 @@ export default class PullRequest extends View {
     this.folds = new Map();
     this.aboutOpen = this.saved(ABOUT_OPEN, true) === true;
     this.filesOpen = this.saved(FILES_OPEN, false) === true;
-    /** The diff last drawn, parsed once. @type {({ key: string } & ReturnType<typeof diffOf>) | null} */
+    /** The diff last drawn, parsed once, and why it is plain when it is. @type {({ key: string, why: string | null } & ReturnType<typeof diffOf>) | null} */
     this.diffed = null;
     this.expanded = false;
     this.wide = false;
@@ -285,7 +287,7 @@ export default class PullRequest extends View {
   /**
    * Reads what the snapshot leaves out, each only when wanted and missing: steps for the selected check and the running ones,
    * the description while it is open and older than the pull request, and the files while they are open and of another
-   * head commit. `asked` are the checks whose steps were just asked for.
+   * head commit, with their colours after them. `asked` are the checks whose steps were just asked for.
    */
   async parts(cx, gen, asked = []) {
     this.more = false;
@@ -313,6 +315,36 @@ export default class PullRequest extends View {
     }
     this.state = s;
     cx.notify();
+    if (listed === null || listed.failure !== null) return;
+    // The files are drawn plain as they land; their colours follow.
+    const colours = await this.colour(listed.value);
+    const now = this.showing(gen);
+    if (now === null || now.shown?.files?.list !== listed.value) return;
+    this.state = { ...now, shown: { ...now.shown, files: { ...now.shown.files, colours } } };
+    cx.notify();
+  }
+
+  /**
+   * The files' syntax colours, from the helper in `pierre/`. It runs on this computer wherever gh ran: the diffs are
+   * already here, and it is this computer's node and `npm install` the README asks for. It never rejects: no colours
+   * is an answer, with the reason in its `note`.
+   * @param {File[]} list
+   * @returns {Promise<import("./diff.js").Colours>}
+   */
+  async colour(list) {
+    const folder = `${appHome()}/cache/pr`;
+    const input = `${folder}/highlight-${Date.now()}-${Math.random().toString(36).slice(2)}.json`;
+    const why = (e) => firstLine(classifyRejection(e).text);
+    try {
+      await fs.mkdir(folder, { recursive: true });
+      await fs.writeFile(input, JSON.stringify(helperInput(list)));
+      const colours = await exec("node", [`${appHome()}/mods/pr/pierre/highlight.mjs`, input], { timeout: HELPER_TIMEOUT_MS })
+        .then(coloursOf, (e) => noColours(`No syntax colours: node did not run. ${why(e)}`));
+      await fs.unlink(input);
+      return colours;
+    } catch (e) {
+      return noColours(`No syntax colours: the helper's input could not be written or removed. ${why(e)}`);
+    }
   }
 
   /** `s` with the steps of a STEPS_QUERY run set on its checks. gh exits 1 beside a partial answer, so its stdout is read either way. @returns {Showing} */
@@ -391,8 +423,11 @@ export default class PullRequest extends View {
 
   /** A file's diff ready to draw, parsed once for as long as it is the one drawn. `patch` is not null. */
   diff(file) {
-    const key = `${this.snapshot().pr.head}:${file.path}`;
-    if (this.diffed?.key !== key) this.diffed = { key, ...diffOf(file.patch) };
+    const { head, colours } = /** @type {Showing} */ (this.state).shown.files;
+    const lines = colours?.byPath.get(file.path);
+    const key = `${head}:${file.path}:${colours === undefined ? "plain" : "asked"}`;
+    if (this.diffed?.key !== key) this.diffed = { key, ...diffOf(file.patch, Array.isArray(lines) ? lines : null), why: null };
+    this.diffed.why = plainNote(colours, file.path, this.diffed.coloured);
     return this.diffed;
   }
 

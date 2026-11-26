@@ -1,7 +1,7 @@
 import { div } from "gpui-kit";
 import { Scrollbar, TextView, h_flex, v_flex, v_virtual_list } from "gpui-base";
 import { settings, theme } from "herdr";
-import { rowNumber } from "./diff.js";
+import { ROLES, cutSpans, rowNumber } from "./diff.js";
 import { duration, hasSteps, plural, summarize } from "./model.js";
 import { aboutLine, ago, blockerWords, currentStep, failureLines, headlineOf, liveShown, reviewerWords, selectedRow, stepLink } from "./view.js";
 
@@ -198,7 +198,11 @@ function filesNote(t, s) {
 
 /** Columns a diff is laid out for; a longer line is cut, not scrolled to. */
 const DIFF_COLUMNS = 400;
-const DIFF_INK = { add: "18", del: "18" };
+/** How strongly a row is tinted, as the alpha of its colour: an added or removed line, and the part of it that differs. */
+const DIFF_INK = { add: "18", del: "18", changed: "40" };
+/** The colour of each role in code, by its place in ROLES, from the theme the pane stands in. */
+const ROLE_INK = { plain: "foreground", comment: "dim", string: "ansi2", constant: "ansi3", keyword: "ansi5", function: "ansi4", type: "ansi6", punctuation: "muted" };
+const roleInks = (t) => ROLES.map((role) => t[ROLE_INK[role]]);
 
 /** One file's diff, filling the space it is given. `hint` is a word on how to leave, where there is a way. */
 function diffPane(app, t, file, hint) {
@@ -212,7 +216,13 @@ function diffPane(app, t, file, hint) {
     return pane.child(line(file.additions + file.deletions > 0 ? "GitHub gives no diff for this file: it is too large. Press o to open the pull request's files."
       : "No text diff: a binary file, or one that only moved.", t.muted).p(12));
   }
-  const { rows, columns, digits } = app.diff(file);
+  const { rows, columns, digits, why } = app.diff(file);
+  const inks = roleInks(t);
+  /** A line's text: in its colours once the helper has read the file, plain until then. The part of a changed line that differs is marked. */
+  const text = (row) => (row.spans === undefined ? div().flex_1().min_w(0).truncate().child(row.text.slice(0, DIFF_COLUMNS) || " ")
+    : h_flex().flex_1().min_w(0).overflow_hidden().children(cutSpans(row.spans, DIFF_COLUMNS).map(([role, part, changed]) =>
+      div().flex_none().text_color(inks[role]).when(changed === 1, (el) => el.bg((row.kind === "add" ? t.ansi2 : t.ansi1) + DIFF_INK.changed)).child(part))));
+  const noted = why === null ? pane : pane.child(line(why, t.dim).flex_none().px(12).py(4).truncate().border_b_1().border_color(t.border));
   const size = settings().font_size ?? 13;
   const height = Math.ceil(size * 1.8), char = size * 0.64, gutter = Math.ceil(digits * char) + 2;
   const id = `diff:${file.path}`;
@@ -222,9 +232,9 @@ function diffPane(app, t, file, hint) {
       .when(row.kind === "add", (el) => el.bg(t.ansi2 + DIFF_INK.add)).when(row.kind === "del", (el) => el.bg(t.ansi1 + DIFF_INK.del))
       .child(div().w(gutter).ml(6).flex_none().text_right().text_color(t.dim).child(String(rowNumber(row))))
       .child(div().w(char).flex_none().text_color(row.kind === "add" ? t.ansi2 : row.kind === "del" ? t.ansi1 : t.dim).child(row.kind === "add" ? "+" : row.kind === "del" ? "−" : ""))
-      .child(div().flex_1().min_w(0).truncate().child(row.text.slice(0, DIFF_COLUMNS) || " "));
+      .child(text(row));
   };
-  return pane.child(div().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(size)
+  return noted.child(div().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(size)
     .child(div().id(`${id}:x`).size_full().overflow_x_scrollbar()
       .child(div().w_full().min_w(Math.max(300, Math.min(columns, DIFF_COLUMNS) * char + gutter + 6 + char + 40)).h_full()
         .child(v_virtual_list(id, rows.length, height, (i) => String(i), (range) => rows.slice(range.start, range.end).map(draw)).size_full())))
