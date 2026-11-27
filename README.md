@@ -9,6 +9,10 @@ Mods for the [Herdr app](https://herdr.dev), one folder each under `mods/`.
 | [pr](mods/pr) | The pull request of the branch you are on, as a pane beside your terminals: its stage, what blocks merging, every check and the step a running job is on, its files and diffs, notes on them sent to the tab's agent or posted on GitHub as a review, GitHub's review threads among the lines, and Merge |
 | [tuido](mods/tuido) | Your tuido todo lists in a floating window: complete, add, open in your editor, sort, archive and sync |
 
+The [pr](mods/pr) mod, beside a terminal:
+
+![The PR pane beside a terminal: checks running, a failed check, the description, a diff, and a review sent to the agent](mods/pr/docs/media/demo.gif)
+
 ## Install
 
 Clone the repo and link a mod into the app's mods:
