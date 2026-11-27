@@ -1,11 +1,11 @@
 import { div } from "gpui-kit";
 import { Input, Scrollbar, TextView, h_flex, h_resizable, resizable_panel, v_flex, v_virtual_list } from "gpui-base";
 import { settings, theme } from "herdr";
-import { CUT_COLUMNS, ROLES, cutSpans, rowNumber, wrapSpans } from "./diff.js";
+import { CUT_COLUMNS, ROLES, isLine, rowNumber, rowSpans } from "./diff.js";
 import { duration, hasSteps, plural, summarize } from "./model.js";
-import { firstLine } from "./github.js";
+import { byName, firstLine, prRef, shortSha } from "./github.js";
 import { KINDS, askWords, countByPath, stretch, threadStretch, threadWhere, threadsByPath, toSend } from "./review.js";
-import { aboutLine, ago, blockerWords, currentStep, failureLines, headlineOf, liveShown, reviewerWords, saidLine, selectedRow, stepLink, threadsLine } from "./view.js";
+import { aboutLine, ago, blockerWords, currentStep, detailOf, failureLines, headlineOf, liveShown, reviewerWords, saidLine, saidTone, selectedRow, stepLink, threadsLine } from "./view.js";
 
 export const WIDE_PX = 720;
 /** The narrowest the list is dragged to beside a diff or a check's steps, in px. */
@@ -18,7 +18,6 @@ const glyphOf = (item) => (waiting(item) ? "○" : GLYPHS[item.bucket]);
 const toneInk = (t, tone) => ({ working: t.ansi3, blocked: t.ansi1, done: t.ansi2, idle: t.dim }[tone]);
 const inkOf = (t, item) => (waiting(item) ? t.dim : { pass: t.ansi2, fail: t.ansi1, pending: t.ansi3, skipping: t.dim, cancel: t.muted }[item.bucket]);
 const stateWords = (state) => state.toLowerCase().replaceAll("_", " ");
-const short = (sha) => sha.slice(0, 7);
 const folder = (cwd) => cwd.split("/").filter(Boolean).at(-1) ?? cwd;
 const open = (url) => (_e, cx) => cx.open_url(url);
 
@@ -27,6 +26,8 @@ const dot = (t, tone, look) => div().size(9).rounded(5).flex_none().bg(toneInk(t
   .when(look === "faded", (el) => el.opacity(0.45));
 
 const line = (text, color) => div().text_size(12).text_color(color).child(text);
+/** A few small words at a row's end, never squeezed. */
+const chip = (text, color) => div().flex_none().text_size(11).text_color(color).child(text);
 
 function notice(t, tone, look, headline, lines) {
   return v_flex().p(14).gap(4)
@@ -37,8 +38,7 @@ function notice(t, tone, look, headline, lines) {
 const where = (t, place) => [`${place.pin ?? `${place.branch ?? "no branch"} · ${folder(place.cwd)}`}${place.machine === null ? "" : ` on ${place.machine}`}`, t.dim];
 
 function failed(app, t, failure, now, place) {
-  const { headline, tone, fix } = failureLines(failure, app.resetAt, now, place.pin);
-  const named = place.pin !== null && headline.includes(place.pin);
+  const { headline, tone, fix, named } = failureLines(failure, app.resetAt, now, place.pin);
   return notice(t, tone, "still", headline, [fix === null ? null : [fix, t.muted], named ? null : where(t, place)]);
 }
 
@@ -76,8 +76,8 @@ function snapshotView(app, t, s, now) {
   const sum = summarize(snapshot, { localHead: s.phase === "showing" ? s.localHead : null });
   const rows = app.rows();
   const selected = selectedRow(rows, app.selected);
-  const check = selected?.kind === "check" ? selected.check : null;
-  const file = app.detailFile();
+  const detail = detailOf(rows, app.selected, app.wide, app.expanded);
+  const file = detail?.kind === "file" ? detail.file : null, check = detail?.kind === "check" ? detail.check : null;
   const pane = v_flex().size_full().min_h(0).child(header(app, t, s, sum, now));
   // A diff wants the pane's width: in a narrow pane it stands in place of the list until Esc.
   if (!app.wide && file !== null) return pane.child(diffPane(app, t, file, now));
@@ -87,7 +87,7 @@ function snapshotView(app, t, s, now) {
     const drawn = rowView(app, t, row, row === selected, clock, noted);
     const under = row.kind === "about" && row.open ? aboutBlock(t, s, now)
       : row.kind === "files" && row.open && s.shown.files === null ? filesNote(t, s)
-      : !app.wide && app.expanded && row === selected && check !== null
+      : !app.wide && row === selected && check !== null
         ? div().id("details-under").ml(24).mr(12).my(4).rounded(6).bg(t.raised).child(details(t, check, s, clock))
         : null;
     return under === null ? drawn : v_flex().flex_none().child(drawn).child(under);
@@ -133,8 +133,8 @@ function header(app, t, s, sum, now) {
         .hover((x) => x.text_color(t.foreground)).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => app.closePane()).child("✕"))))
     .child(div().pl(17).text_size(13).text_color(live || source === "replay" ? t.foreground : t.muted).child(headlineOf(sum)))
     .when(blockers.length > 0, (el) => el.child(line(blockers.join(" · "), t.muted).pl(17)))
-    .child(fine(`${repo}${pr.headRef} → ${pr.baseRef} · ${short(pr.head)} · +${pr.additions} −${pr.deletions} · ${plural(pr.files, "file")}`))
-    .when(sum.stale, (el) => el.child(line(`Your checkout is at ${short(s.localHead)}, not ${short(pr.head)}, the commit CI ran.`, t.muted).pl(17)))
+    .child(fine(`${repo}${pr.headRef} → ${pr.baseRef} · ${shortSha(pr.head)} · +${pr.additions} −${pr.deletions} · ${plural(pr.files, "file")}`))
+    .when(sum.stale, (el) => el.child(line(`Your checkout is at ${shortSha(s.localHead)}, not ${shortSha(pr.head)}, the commit CI ran.`, t.muted).pl(17)))
     .when(trouble !== null, (el) => {
       const { headline, fix } = failureLines(trouble.failure, app.resetAt, now, pin);
       return el.child(line(fix === null ? headline : `${headline}. ${fix}`, t.muted).pl(17));
@@ -188,8 +188,8 @@ function rowView(app, t, row, selected, now, noted) {
       .child(h_flex().flex_1().min_w(0).text_size(12.5)
         .child(div().min_w(0).truncate().text_color(t.dim).child(file.path.slice(0, at)))
         .child(div().flex_none().max_w_full().truncate().text_color(t.foreground).child(file.path.slice(at))))
-      .children(noted.mine.has(file.path) ? [div().flex_none().text_size(11).text_color(t.ansi3).child(plural(noted.mine.get(file.path), "note"))] : [])
-      .children(theirs === undefined ? [] : [div().flex_none().text_size(11).text_color(theirs.open ? t[THREAD_INK] : t.dim).child(theirs.text)])
+      .children(noted.mine.has(file.path) ? [chip(plural(noted.mine.get(file.path), "note"), t.ansi3)] : [])
+      .children(theirs === undefined ? [] : [chip(theirs.text, theirs.open ? t[THREAD_INK] : t.dim)])
       .children(fileCounts(t, file));
   }
   if (row.kind === "hidden") {
@@ -208,8 +208,8 @@ function rowView(app, t, row, selected, now, noted) {
 const FILE_MARKS = { added: "A", removed: "D", renamed: "R", copied: "C", modified: "M", changed: "M", unchanged: "·" };
 const fileMark = (t, file) => div().w(14).flex_none().text_size(11).text_color({ added: t.ansi2, removed: t.ansi1 }[file.status] ?? t.ansi3).child(FILE_MARKS[file.status]);
 const fileCounts = (t, file) => [
-  ...file.additions > 0 ? [div().flex_none().text_size(11).text_color(t.ansi2).child(`+${file.additions}`)] : [],
-  ...file.deletions > 0 ? [div().flex_none().text_size(11).text_color(t.ansi1).child(`−${file.deletions}`)] : [],
+  ...file.additions > 0 ? [chip(`+${file.additions}`, t.ansi2)] : [],
+  ...file.deletions > 0 ? [chip(`−${file.deletions}`, t.ansi1)] : [],
 ];
 
 function filesNote(t, s) {
@@ -223,8 +223,9 @@ const DIFF_INK = { add: "18", del: "18", changed: "40" };
 const ROLE_INK = { plain: "foreground", comment: "dim", string: "ansi2", constant: "ansi3", keyword: "ansi5", function: "ansi4", type: "ansi6", punctuation: "muted" };
 const roleInks = (t) => ROLES.map((role) => t[ROLE_INK[role]]);
 
+const fontSize = () => settings().font_size ?? 13;
 /** The height of one line of a diff. A row is as many of them as its text folds into. */
-export const lineHeight = () => Math.ceil((settings().font_size ?? 13) * 1.8);
+export const lineHeight = () => Math.ceil(fontSize() * 1.8);
 /** What the scrollbar takes of a diff's width. */
 const SCROLLBAR_PX = 14;
 
@@ -233,7 +234,7 @@ const SCROLLBAR_PX = 14;
  * runs past the edge, the line-number column, and all that stands left of a line's text.
  */
 function measures(digits) {
-  const size = settings().font_size ?? 13;
+  const size = fontSize();
   const char = size * 0.64, gutter = Math.ceil(digits * char) + 2;
   return { size, char, gutter, left: 6 + char + gutter + 10 + char + 10 };
 }
@@ -251,7 +252,7 @@ const KIND_INK = { issue: "ansi1", suggestion: "ansi2", question: "ansi3", comme
 const THREAD_GLYPH = "◆";
 const THREAD_INK = "ansi6";
 const HINTS = ["v range", "c comment", "s suggestion", "i issue", "a ask", "o on the whole", "h l between them", "n p files"];
-const who = (said) => said?.who ?? "A deleted account";
+const who = (said) => byName(said?.who ?? null);
 
 /** One file's diff, filling the space it is given, with what is noted on it among its lines and the review's bar under it. */
 function diffPane(app, t, file, now) {
@@ -261,7 +262,7 @@ function diffPane(app, t, file, now) {
     .child(fileMark(t, file))
     .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(file.previous === null ? file.path : `${file.previous} → ${file.path}`))
     .children(fileCounts(t, file))
-    .children(file.patch === null ? [] : [div().flex_none().text_size(11).text_color(t.dim).child(hint)]);
+    .children(file.patch === null ? [] : [chip(hint, t.dim)]);
   const pane = v_flex().size_full().min_h(0).child(top);
   if (file.patch === null) {
     return pane.child(line(file.additions + file.deletions > 0 ? "GitHub gives no diff for this file: it is too large. Press o to open the pull request's files."
@@ -275,27 +276,26 @@ function diffPane(app, t, file, now) {
   const { size, char, gutter, left } = measures(digits);
   const height = lineHeight();
   const id = `diff:${file.path}`;
+  // What is noted under a line, in one row: whose it is, what there is to say of it, then its words, which are cut at
+  // the row's end; the bar under the diff has them whole.
+  const noteRow = (id, name, ink, meta, body, bodyInk) => h_flex().w_full().h(height).flex_none().pl(left).pr(SCROLLBAR_PX).gap(8).items_center()
+    .bg(id === app.activeId ? t.selected : t.raised)
+    .child(div().flex_none().text_color(ink).child(name))
+    .children(meta.filter((x) => x !== null).map((words) => div().flex_none().text_color(t.dim).child(words)))
+    .child(div().flex_1().min_w(0).truncate().text_color(bodyInk).child(body));
   const draw = (item) => {
     if (item.type === "annotation") {
       const { annotation: one, moved } = item;
-      const asked = askWords(one, app.sending);
-      return h_flex().w_full().h(height).flex_none().pl(left).pr(SCROLLBAR_PX).gap(8).items_center()
-        .bg(one.id === app.activeId ? t.selected : t.raised)
-        .child(div().flex_none().text_color(t[KIND_INK[one.kind]]).child(`${KINDS[one.kind].glyph} ${KINDS[one.kind].label}`))
-        // What there is to say of it stands before its words, which are cut at the row's end; the bar under the diff has them whole.
-        .children([moved ? `${one.target.where} at an earlier commit` : null, asked].filter((x) => x !== null).map((words) => div().flex_none().text_color(t.dim).child(words)))
-        .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(one.body));
+      return noteRow(one.id, `${KINDS[one.kind].glyph} ${KINDS[one.kind].label}`, t[KIND_INK[one.kind]],
+        [moved ? `${one.target.where} at an earlier commit` : null, askWords(one, app.sending)], one.body, t.foreground);
     }
     if (item.type === "thread") {
       const { thread, placed } = item;
       const count = thread.comments.length + thread.more;
       const meta = [placed ? null : threadWhere(thread, false), thread.resolved ? "resolved" : null, count > 1 ? `${count - 1} more` : null, app.sending.has(thread.id) ? "writing…" : null];
       // A resolved thread is settled: it stands back from the ones still open.
-      return h_flex().w_full().h(height).flex_none().pl(left).pr(SCROLLBAR_PX).gap(8).items_center()
-        .bg(thread.id === app.activeId ? t.selected : t.raised)
-        .child(div().flex_none().text_color(thread.resolved ? t.dim : t[THREAD_INK]).child(`${THREAD_GLYPH} ${who(thread.comments[0])}`))
-        .children(meta.filter((x) => x !== null).map((words) => div().flex_none().text_color(t.dim).child(words)))
-        .child(div().flex_1().min_w(0).truncate().text_color(thread.resolved ? t.muted : t.foreground).child(firstLine(thread.comments[0]?.body ?? "")));
+      return noteRow(thread.id, `${THREAD_GLYPH} ${who(thread.comments[0])}`, thread.resolved ? t.dim : t[THREAD_INK], meta,
+        firstLine(thread.comments[0]?.body ?? ""), thread.resolved ? t.muted : t.foreground);
     }
     const { row, index, mark } = item;
     const on = picked !== null && index >= picked.start && index <= picked.end;
@@ -304,12 +304,12 @@ function diffPane(app, t, file, now) {
     const strip = div().w(3).h_full().flex_none().when(on, (el) => el.bg(at ? t.foreground : t.dim));
     const marked = div().w(char).ml(3).flex_none().text_color(mark === null ? t.dim : mark === "thread" ? t[THREAD_INK] : t[KIND_INK[mark]])
       .child(mark === null ? "" : mark === "thread" ? THREAD_GLYPH : KINDS[mark].glyph);
-    if (row.kind === "hunk" || row.kind === "note") {
+    if (!isLine(row)) {
       return h_flex().w_full().h(height).flex_none().items_center().bg(on ? t.selected : t.raised).text_color(at ? t.foreground : t.dim)
         .child(strip).child(marked).child(div().flex_1().min_w(0).pl(6).pr(SCROLLBAR_PX).truncate().child(row.text));
     }
     // A line longer than the diff is wide is folded at the edge, as a terminal folds it; its number stands by its first line.
-    const lines = wrapSpans(cutSpans(row.spans ?? [[0, row.text, 0]], CUT_COLUMNS), columns);
+    const lines = rowSpans(row, columns);
     const tint = (row.kind === "add" ? t.ansi2 : t.ansi1) + DIFF_INK.changed;
     return h_flex().w_full().h(lines.length * height).flex_none().items_start()
       .when(row.kind === "add", (el) => el.bg(t.ansi2 + DIFF_INK.add)).when(row.kind === "del", (el) => el.bg(t.ansi1 + DIFF_INK.del))
@@ -349,7 +349,7 @@ function reviewBar(app, t, reading, now) {
     .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
     .child(Input.new(app.input).h_full().text_size(12.5).text_color(t.foreground));
   const to = app.agent();
-  const name = to.terminal === null ? "the agent" : to.name;
+  const { name } = to;
   if (app.draft !== null && "reply" in app.draft) {
     const { reply, failed } = app.draft;
     return bar(threadTag(reply, failed === null ? "Enter posts the reply on GitHub, Esc gives it up" : `GitHub did not take it: ${failed} Enter tries again, Esc gives it up`), field());
@@ -362,8 +362,7 @@ function reviewBar(app, t, reading, now) {
   const count = toSend(annotations).length;
   const asked = app.confirming;
   if (asked !== null) {
-    const { target } = app.state;
-    const there = `${target.owner}/${target.name}#${target.number}`;
+    const there = prRef(app.state.target);
     const words = asked.what === "send" ? `Send ${plural(count, "annotation")} to ${name}? Enter sends them, Esc keeps them here.`
       : asked.what === "forward" ? `Send this thread to ${name}? Enter sends it, Esc does not.`
       : asked.event === "APPROVE" ? `Approve ${there} on GitHub${count === 0 ? "" : `, with ${plural(count, "annotation")}`}? Enter approves it, Esc does not.`
@@ -394,7 +393,7 @@ function reviewBar(app, t, reading, now) {
 }
 
 /** What is on its way out of the pane, and the line that says so while it is. */
-const SENDING = [["review", "Sending the review…"], ["post", "Posting the review on GitHub…"], ["forward", "Sending the thread…"]];
+const SENDING = [["send", "Sending the review…"], ["post", "Posting the review on GitHub…"], ["forward", "Sending the thread…"]];
 
 function aboutBlock(t, s, now) {
   const say = (text) => line(text, t.dim).pl(32).pr(14).pb(8);
@@ -421,7 +420,7 @@ function conversation(t, about, now) {
   const threads = threadsLine(about);
   const said = about.talk.map((one) => v_flex().pt(8).gap(2).border_t_1().border_color(t.border)
     .child(h_flex().gap(6).items_center()
-      .child(div().w(6).h(6).flex_none().rounded_full().bg(toneInk(t, one.state === "APPROVED" ? "done" : one.state === "CHANGES_REQUESTED" ? "blocked" : "idle")))
+      .child(div().w(6).h(6).flex_none().rounded_full().bg(toneInk(t, saidTone(one))))
       .child(line(saidLine(one, now), t.muted)))
     .children(one.body.trim() === "" ? [] : [div().min_w(0).child(TextView.markdown(`talk:${one.url}`, one.body).selectable(true).text_size(12.5))]));
   return [
