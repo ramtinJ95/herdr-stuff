@@ -17,7 +17,7 @@ export const ROLES = /** @type {const} */ (["plain", "comment", "string", "const
 const HUNK = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
 /** Text draws a tab as nothing: each is padded to the next 4-column stop, counted along the whole line. @param {Span[]} spans @returns {Span[]} */
-export function untabSpans(spans) {
+function untabSpans(spans) {
   if (!spans.some(([, text]) => text.includes("\t"))) return spans;
   let column = 0;
   return spans.map(([role, text, changed]) => {
@@ -38,7 +38,7 @@ const untab = (text) => untabSpans([[0, text, 0]])[0][1];
  * @param {string} patch
  * @returns {DiffRow[]}
  */
-export function patchRows(patch) {
+function patchRows(patch) {
   let old = 0, next = 0;
   return patch.split("\n").map((line) => {
     const hunk = HUNK.exec(line);
@@ -69,7 +69,7 @@ export const rowNumber = (row) => (isLine(row) ? row.new ?? row.old : null);
  * @param {Line[]} lines
  * @returns {DiffRow[] | null}
  */
-export function paintRows(rows, lines) {
+function paintRows(rows, lines) {
   let at = 0;
   const painted = [];
   for (const row of rows) {
@@ -107,7 +107,7 @@ export function diffOf(patch, lines = null) {
 }
 
 /** The spans that fit in `columns` characters: a longer line is cut, as a plain one is. @param {Span[]} spans @returns {Span[]} */
-export function cutSpans(spans, columns) {
+function cutSpans(spans, columns) {
   const kept = [];
   let left = columns;
   for (const [role, text, changed] of spans) {
@@ -126,7 +126,7 @@ export const CUT_COLUMNS = 400;
  * There is always a first line, empty for no text.
  * @param {Span[]} spans @returns {Span[][]}
  */
-export function wrapSpans(spans, columns) {
+function wrapSpans(spans, columns) {
   /** @type {Span[][]} */
   const lines = [[]];
   let room = columns;
@@ -157,52 +157,4 @@ export const rowLines = (row, columns) =>
 export function rowSpans(row, columns) {
   const spans = row.spans ?? [[0, row.text, 0]];
   return row.text.length <= Math.min(columns, CUT_COLUMNS) ? [spans] : wrapSpans(cutSpans(spans, CUT_COLUMNS), columns);
-}
-
-/** The last line of what a program wrote to stderr: where it says what went wrong. */
-export const lastLine = (text) => text.trim().split("\n").at(-1);
-
-/**
- * What the helper said of a pull request's files: each file's lines by path, or for a file it could not read the reason,
- * and in `note` why there are no colours at all, when it did not run.
- * @typedef {{ byPath: Map<string, Line[] | string>, note: string | null }} Colours
- */
-
-/** No colours for any file, and why. @returns {Colours} */
-export const noColours = (note) => ({ byPath: new Map(), note });
-
-/** What the helper is given: the files that have a diff. */
-export const helperInput = (files) =>
-  ({ files: files.filter((file) => file.patch !== null).map(({ path, previous, status, patch }) => ({ path, previous, status, patch })) });
-
-/**
- * A run of the helper read as colours. A helper that exits non-zero, or prints what is not its answer, gives the note.
- * @param {{ code: number, stdout: string, stderr: string }} result
- * @returns {Colours}
- */
-export function coloursOf({ code, stdout, stderr }) {
-  if (code !== 0) {
-    if (stderr.includes("ERR_MODULE_NOT_FOUND")) return noColours("No syntax colours: run `npm install` in mods/pr/pierre.");
-    return noColours(`No syntax colours: the helper failed. ${lastLine(stderr)}`);
-  }
-  try {
-    const { files } = JSON.parse(stdout);
-    return { byPath: new Map(files.map((file) => [file.path, file.lines ?? String(file.error)])), note: null };
-  } catch (e) {
-    return noColours(`No syntax colours: the helper's answer did not read. ${e instanceof Error ? e.message : String(e)}`);
-  }
-}
-
-/**
- * Why a file's diff is drawn plain, or null when it is coloured or the helper has not answered yet.
- * @param {Colours | undefined} colours `undefined` until the helper has been asked
- * @param {string} path
- * @param {boolean} coloured whether the helper's lines went onto the rows
- */
-export function plainNote(colours, path, coloured) {
-  if (colours === undefined || coloured) return null;
-  if (colours.note !== null) return colours.note;
-  const lines = colours.byPath.get(path);
-  if (typeof lines === "string") return `No syntax colours for this file: ${lines}`;
-  return `No syntax colours for this file: the helper ${lines === undefined ? "did not answer for it" : "read other lines than these"}.`;
 }

@@ -8,13 +8,15 @@
  *   description: string | null, steps: Step[] | null }} Check
  */
 /** Where a pull request lives. @typedef {{ host: string, owner: string, name: string, number: number }} Target */
+/** @typedef {"merge" | "squash" | "rebase"} MergeMethod */
 /**
- * `resetAt` is when the rate limit starts over, in ms.
+ * `resetAt` is when the rate limit starts over, in ms. `method` is how Merge would merge it: the person's default where
+ * the repository allows it, else the first it allows, null when it allows none.
  * @typedef {{ pr: { number: number, title: string, url: string, state: "OPEN" | "CLOSED" | "MERGED", draft: boolean, head: string,
  *   headRef: string, baseRef: string, mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN",
  *   mergeState: "CLEAN" | "HAS_HOOKS" | "UNSTABLE" | "BLOCKED" | "BEHIND" | "DIRTY" | "DRAFT" | "UNKNOWN",
  *   review: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null, additions: number, deletions: number, files: number,
- *   updatedAt: string }, checks: Check[], hidden: number, resetAt: number | null }} Snapshot
+ *   updatedAt: string }, checks: Check[], hidden: number, resetAt: number | null, method: MergeMethod | null }} Snapshot
  */
 
 /** @typedef {"APPROVED" | "CHANGES_REQUESTED" | "DISMISSED" | "COMMENTED" | "PENDING"} ReviewState */
@@ -54,7 +56,6 @@ export class GhError extends Error {
   constructor(kind, text) {
     super(text);
     this.kind = kind;
-    this.text = text;
   }
 }
 
@@ -159,9 +160,19 @@ const failureOf = (errors) => {
 function pullRequestOf(raw) {
   if (Array.isArray(raw?.errors) && raw.errors.length > 0) throw failureOf(raw.errors);
   const data = obj(raw?.data, "data");
-  return { data, p: obj(obj(data.repository, "data.repository").pullRequest, "data.repository.pullRequest") };
+  const repository = obj(data.repository, "data.repository");
+  return { data, repository, p: obj(repository.pullRequest, "data.repository.pullRequest") };
 }
 const at = (field) => `pullRequest.${field}`;
+
+const METHODS = /** @type {const} */ ([["merge", "mergeCommitAllowed"], ["squash", "squashMergeAllowed"], ["rebase", "rebaseMergeAllowed"]]);
+
+/** @returns {MergeMethod | null} */
+function mergeMethod(repository) {
+  const allowed = METHODS.filter(([, flag]) => repository[flag] === true).map(([method]) => method);
+  const preferred = String(repository.viewerDefaultMergeMethod ?? "").toLowerCase();
+  return allowed.find((method) => method === preferred) ?? allowed[0] ?? null;
+}
 
 /** A recorded frame as the answer gh printed for it. */
 export const frameAnswer = (frame) => ({ data: { rateLimit: frame.rateLimit ?? null, repository: { pullRequest: frame.pr } }, errors: frame.errors ?? null });
@@ -171,7 +182,7 @@ export const frameAnswer = (frame) => ({ data: { rateLimit: frame.rateLimit ?? n
  * @returns {Snapshot}
  */
 export function parsePr(raw) {
-  const { data, p } = pullRequestOf(raw);
+  const { data, repository, p } = pullRequestOf(raw);
   const commit = obj(obj(list(obj(p.commits, at("commits")).nodes, at("commits.nodes"))[0], at("commits.nodes[0]")).commit, at("commits.nodes[0].commit"));
   const rollup = commit.statusCheckRollup === null ? null : obj(commit.statusCheckRollup, "statusCheckRollup");
   const contexts = rollup === null ? null : obj(rollup.contexts, "statusCheckRollup.contexts");
@@ -190,6 +201,7 @@ export function parsePr(raw) {
     checks: latestOnly(nodes.map((n, i) => context(obj(n, `contexts.nodes[${i}]`), `contexts.nodes[${i}]`))).sort(displayOrder),
     hidden: contexts === null ? 0 : int(contexts.totalCount, "statusCheckRollup.contexts.totalCount") - nodes.length,
     resetAt: limit === null ? null : Date.parse(str(obj(limit, "rateLimit").resetAt, "rateLimit.resetAt")),
+    method: mergeMethod(repository),
   };
 }
 
@@ -271,12 +283,7 @@ export function mergeSteps(snapshot, raw) {
 const PR_URL = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#].*)?$/;
 const targetOf = (m) => ({ host: m[1], owner: m[2], name: m[3], number: Number(m[4]) });
 
-/** gh's own lookup of the pull request for the branch checked out in the folder it runs in. */
-export function prLookupArgs() {
-  return ["pr", "view", "--json", "url"];
-}
-
-/** Where the pull request lives, from `prLookupArgs()`'s stdout. */
+/** Where the pull request lives, from the stdout of a `lookupArgs` run. */
 export function parseLookup(stdout) {
   let url;
   try {
@@ -306,6 +313,15 @@ export function parsePin(text) {
 /** A pull request as people write it, and as `parsePin` reads it on github.com. @param {Target} target */
 export const prRef = (target) => `${target.owner}/${target.name}#${target.number}`;
 
+/** A pull request's page, which `parsePin` reads on any host. @param {Target} target */
+export const prUrl = (target) => `https://${repoSlug(target)}/pull/${target.number}`;
+
+/** A repository as gh's `-R` takes it. @param {Target} target */
+export const repoSlug = (target) => `${target.host}/${target.owner}/${target.name}`;
+
+/** A pull request's name in what is stored. GitHub reads an owner and a repository in any case, so one case is kept. @param {Target} target */
+export const prKey = (target) => `${repoSlug(target)}#${target.number}`.toLowerCase();
+
 /** A commit as people write it. */
 export const shortSha = (sha) => sha.slice(0, 7);
 
@@ -328,8 +344,6 @@ export function classifyFailure({ code, stderr }) {
   return { kind: code === 4 ? "no-auth" : kindOf(text), text };
 }
 
-export const firstLine = (text) => text.split("\n")[0];
-
 /**
  * A gh run read with `parse`: its value, or what went wrong, whether gh failed or `parse` threw.
  * @template T
@@ -348,7 +362,7 @@ export function readAnswer(result, parse) {
 
 /** What a thrown error means: a GhError from the parsers here, or a rejected `exec` (gh missing, a timeout). @returns {Failure} */
 export function classifyRejection(error) {
-  if (error instanceof GhError) return { kind: error.kind, text: error.text };
+  if (error instanceof GhError) return { kind: error.kind, text: error.message };
   const text = error instanceof Error ? error.message : String(error);
   if (/No such file or directory|not found/i.test(text)) return { kind: "no-gh", text };
   if (/timed out/i.test(text)) return { kind: "offline", text };

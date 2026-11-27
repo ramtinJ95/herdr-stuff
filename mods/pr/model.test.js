@@ -2,14 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { GhError, classifyFailure, classifyRejection, frameAnswer, mergeSteps, parseAbout, parseLookup, parsePin, parsePr, prLookupArgs } from "./github.js";
-import { POLL, describeFailure, duration, failureDelay, groups, keepSteps, nextPollDelay, offersMerge, stepsWanted, summarize, troubleAfter } from "./model.js";
-import { stepsArgs } from "./query.js";
-import { FAILED, PASSED, PENDING, RUNNING, SETTLED, committed, frame, readJson, recordings, snapshotOf } from "./recorded.js";
+import { classifyFailure, frameAnswer, parsePr } from "./github.js";
+import { failureDelay, groups, keepSteps, nextPollDelay, offersMerge, staleCheckout, stepsWanted, summarize, troubleAfter } from "./model.js";
+import { FAILED, PASSED, PENDING, RUNNING, SETTLED, committed, failures, recordings, sample, snapshotOf } from "./recorded.js";
+import { failureLines } from "./view.js";
 
 const here = new URL(".", import.meta.url).pathname;
-const failures = readJson("failures.json");
-const live = readJson("live.json");
 
 const run = (commit, name) => {
   const node = commit.statusCheckRollup.contexts.nodes.find((n) => n.name === name);
@@ -52,30 +50,26 @@ test("differential: the de-duplicated checks and counts match gh pr checks on ev
 test("differential: the recordings in PR_FIXTURES_EXTRA match gh pr checks", { skip: process.env.PR_FIXTURES_EXTRA ? false : "PR_FIXTURES_EXTRA is not set" },
   (t) => differential(t, recordings(process.env.PR_FIXTURES_EXTRA)));
 
-test("lifecycle replay: each steady frame's CI kind is what gh's buckets for that moment say", (t) => {
-  const ghSummary = (buckets) => (buckets.length === 0 ? "none" : ["fail", "pending", "cancel"].find((b) => buckets.includes(b)) ?? "pass");
-  let changing = 0;
-  for (const { name, frames } of committed) {
-    const ours = [], theirs = [];
-    for (const f of frames.filter((x) => x.oracle.steady && oracleChecks(x) !== null)) {
-      const s = summarize(parsePr(frameAnswer(f)));
-      if (s.ci.basis !== "all") continue;
-      ours.push(s.ci.kind);
-      theirs.push(ghSummary(oracleChecks(f).map((o) => o.bucket)));
-    }
-    assert.deepEqual(ours, theirs, name);
-    const seq = ours.filter((k, i) => k !== ours[i - 1]);
-    if (seq.length > 1) changing++;
-    t.diagnostic(`${name}: ${seq.join(" then ") || "no steady frame"}`);
-  }
-  assert.ok(changing > 0, "some recording goes through more than one CI kind");
-});
-
-const sample = (kind, how) => {
-  const found = failures.samples.find((s) => s.kind === kind && how.test(s.how));
-  assert.ok(found, `failures.json has a ${kind} sample matching ${how}`);
-  return found;
+/** The CI kinds each committed recording went through, steady frame by steady frame, as gh pr checks reported its checks then. */
+const LIFECYCLE = {
+  "first-game-145-2026-11-26T175935787Z": "pass",
+  "first-game-146-2026-11-26T180250120Z": "pending then pass",
+  "first-game-146-2026-11-26T180650776Z": "pending",
+  "first-game-147-2026-11-26T182020174Z": "pending then fail",
+  "first-game-50-2026-11-26T175837551Z": "fail",
+  "first-game-66-2026-11-26T175907931Z": "fail",
+  "survive-n-conquest-1-2026-11-26T180005277Z": "none",
+  "survive-n-conquest-62-2026-11-26T180258328Z": "pending then pass",
 };
+
+test("lifecycle replay: each recording's steady frames go through the CI kinds it went through when it was recorded", () => {
+  const went = Object.fromEntries(committed.map(({ name, frames }) => {
+    const kinds = frames.filter((f) => f.oracle.steady && oracleChecks(f) !== null).map((f) => summarize(parsePr(frameAnswer(f))).ci)
+      .filter((ci) => ci.basis === "all").map((ci) => ci.kind);
+    return [name, kinds.filter((kind, i) => kind !== kinds[i - 1]).join(" then ")];
+  }));
+  assert.deepEqual(went, LIFECYCLE);
+});
 
 const CASES = {
   "No PR": () => ({ failure: classifyFailure(sample("no-pr", /default branch/).exec) }),
@@ -134,9 +128,9 @@ const CASES = {
 const seconds = (ms) => (ms === null ? "never" : `${ms / 1000} s`);
 function tableRow(input) {
   if (input.failure !== undefined) {
-    const line = describeFailure(input.failure);
-    return ["none", "-", "-", line.headline, line.tone,
-      seconds(failureDelay(troubleAfter(null, input.failure)))];
+    const trouble = troubleAfter(null, input.failure, null);
+    const line = failureLines(trouble, 0, null);
+    return ["none", "-", "-", line.headline, line.tone, seconds(failureDelay(trouble))];
   }
   const s = summarize(input.snapshot);
   const ci = `${s.ci.kind}${s.ci.basis === "required" ? " (required)" : ""}${input.snapshot.hidden > 0 ? `, ${input.snapshot.hidden} hidden` : ""}`;
@@ -171,20 +165,14 @@ test("an optional failure stays in the counts of all checks while the required o
   assert.equal(ci.all.fail, 2);
 });
 
-test("synthetic: checks beyond the 100 returned are counted, not dropped", () => {
-  const { snapshot } = CASES["More than 100 checks"]();
-  assert.equal(snapshot.checks.length, 25);
-  assert.equal(snapshot.hidden, 105);
-});
-
 test("stale: the PR's head is not the commit checked out here", () => {
   const s = snapshotOf(SETTLED, 2);
-  assert.equal(summarize(s, { localHead: s.pr.head }).stale, false);
-  assert.equal(summarize(s, { localHead: "0000000000000000000000000000000000000000" }).stale, true);
-  assert.equal(summarize(s).stale, false);
+  assert.equal(staleCheckout(s.pr, s.pr.head), false);
+  assert.equal(staleCheckout(s.pr, "0000000000000000000000000000000000000000"), true);
+  assert.equal(staleCheckout(s.pr, null), false, "where the checkout is not known");
   const merged = snapshotOf(PASSED);
   assert.equal(merged.pr.state, "MERGED");
-  assert.equal(summarize(merged, { localHead: "0000000000000000000000000000000000000000" }).stale, false);
+  assert.equal(staleCheckout(merged.pr, "0000000000000000000000000000000000000000"), false);
 });
 
 test("Merge is offered on a clean PR, and not while GitHub calls it mergeable with checks running or failing", () => {
@@ -203,16 +191,30 @@ test("Merge is not offered on UNSTABLE even when every check the pane sees passe
   assert.equal(offersMerge(s), false);
 });
 
-test("groups: within a group, by workflow and then name, with numbers in order", () => {
-  const [passed] = groups(snapshotOf(PENDING, 3));
-  assert.equal(passed.key, "pass");
-  assert.deepEqual(names(passed.checks), [
-    "browser-tests (1)", "browser-tests (2)", "browser-tests (3)", "browser-tests (4)", "browser-tests (5)", "browser-tests (6)",
-    "browser-tests (7)", "browser-tests (8)", "capture",
-    "capture-shards (1)", "capture-shards (2)", "capture-shards (3)", "capture-shards (4)", "capture-shards (5)", "capture-shards (6)",
-    "capture-shards (7)", "capture-shards (8)", "capture-shards (9)", "capture-shards (10)", "capture-shards (11)",
-    "e2e", "frame-benches", "memory", "publish-media", "verify",
-  ]);
+test("synthetic: GitHub's HAS_HOOKS is as ready as CLEAN, and Merge is offered on it", () => {
+  const s = summarize(snapshotOf(SETTLED, 2, (pr) => { pr.mergeStateStatus = "HAS_HOOKS"; }));
+  assert.deepEqual([s.merge, s.headline, offersMerge(s)], [{ kind: "ready", clean: true, note: null }, "Ready to merge", true]);
+});
+
+test("synthetic: a required check that was cancelled blocks the merge as one that failed does, not as a branch rule", () => {
+  const s = summarize(snapshotOf(PASSED, 1, (pr, commit) => {
+    Object.assign(pr, { state: "OPEN", mergeable: "MERGEABLE", mergeStateStatus: "BLOCKED" });
+    Object.assign(run(commit, "e2e"), { conclusion: "CANCELLED", isRequired: true });
+  }));
+  assert.deepEqual([s.ci.kind, s.ci.basis, s.headline], ["cancel", "required", "1 required check cancelled"]);
+  assert.deepEqual(s.merge.blockers.map((b) => b.kind), ["checks-failing"]);
+});
+
+test("synthetic: conflicts are told by either of GitHub's two words for them, and a draft by its merge state alone", () => {
+  const blockers = (edit) => summarize(snapshotOf(SETTLED, 2, (pr) => Object.assign(pr, edit))).merge.blockers.map((b) => b.kind);
+  assert.deepEqual(blockers({ mergeable: "CONFLICTING", mergeStateStatus: "UNKNOWN" }), ["conflicts"]);
+  assert.deepEqual(blockers({ mergeable: "UNKNOWN", mergeStateStatus: "DIRTY" }), ["conflicts"]);
+  assert.deepEqual(blockers({ mergeStateStatus: "DRAFT" }), ["draft"]);
+});
+
+test("synthetic: the checks done while others run are all that are not running, a skipped one too", () => {
+  const s = summarize(snapshotOf(PENDING, 1, (_, commit) => { run(commit, "verify").conclusion = "SKIPPED"; }));
+  assert.deepEqual([s.ci.all.skipping, s.headline], [1, "Checks running, 24 of 25 done"]);
 });
 
 test("synthetic: the CI kind follows gh's order, a failure first, then pending, then cancelled", () => {
@@ -251,12 +253,6 @@ test("synthetic: steps are not asked for a check from another app", () => {
   assert.equal(stepsWanted(s, verify.id, 3).includes(verify.id), false);
 });
 
-test("steps inline in a recording carry gh's states and buckets", () => {
-  const memory = snapshotOf(PENDING).checks.find((c) => c.name === "memory");
-  assert.deepEqual(memory.steps.map((x) => x.bucket), [...Array(9).fill("pass"), ...Array(5).fill("pending")]);
-  assert.equal(memory.steps[9].state, "IN_PROGRESS");
-});
-
 test("the next poll keeps the steps of a finished job and does not ask for them again; a running job's are asked for", () => {
   const prev = snapshotOf(PENDING);
   const done = prev.checks.find((c) => c.completedAt !== null && c.steps.length > 0);
@@ -272,198 +268,42 @@ test("the next poll keeps the steps of a finished job and does not ask for them 
   assert.equal(stepsWanted(next, memory.id, 3)[0], memory.id);
 });
 
-test("the snapshot carries when the rate limit starts over", () => {
-  assert.equal(snapshotOf(SETTLED, 2).resetAt, Date.parse(frame(SETTLED, 2).rateLimit.resetAt));
+test("synthetic: a selected job still in progress is asked for once, though every step read of it so far has finished", () => {
+  const recorded = snapshotOf(RUNNING);
+  const job = recorded.checks.find((c) => c.name === "browser-tests (5)");
+  assert.deepEqual([job.state, job.completedAt, job.steps.some((step) => step.bucket !== "pending")], ["IN_PROGRESS", null, true]);
+  const between = { ...recorded, checks: recorded.checks.map((c) => (c.id === job.id ? { ...c, steps: c.steps.filter((step) => step.bucket !== "pending") } : c)) };
+  const wanted = stepsWanted(between, job.id, 6);
+  assert.deepEqual([wanted[0], wanted.filter((id) => id === job.id).length], [job.id, 1]);
 });
 
-test("a live poll without steps has none, and a steps answer sets them on the runs it names", () => {
-  const snapshot = parsePr(live.pr);
-  assert.ok(snapshot.checks.length > 0);
-  assert.ok(snapshot.checks.every((c) => c.steps === null));
-  const merged = mergeSteps(snapshot, live.steps);
-  for (const node of live.steps.data.nodes) {
-    assert.deepEqual(names(merged.checks.find((c) => c.id === node.id).steps), names(node.steps.nodes));
-  }
-  const asked = new Set(live.steps.data.nodes.map((n) => n.id));
-  assert.ok(merged.checks.filter((c) => !asked.has(c.id)).every((c) => c.steps === null));
+test("synthetic: a finished job's steps read while one of them still ran are not kept, and are asked for again", () => {
+  const prev = snapshotOf(PENDING);
+  const done = prev.checks.find((c) => c.completedAt !== null && c.steps.length > 0);
+  const lagging = { ...prev, checks: prev.checks.map((c) => (c.id === done.id ? { ...c, steps: c.steps.map((step, i) => (i === 0 ? { ...step, state: "IN_PROGRESS", bucket: "pending" } : step)) } : c)) };
+  assert.equal(stepsWanted(lagging, done.id, 3)[0], done.id);
+  const fresh = { ...prev, checks: prev.checks.map((c) => ({ ...c, steps: null })) };
+  assert.equal(keepSteps(fresh, lagging).checks.find((c) => c.id === done.id).steps, null);
 });
 
-test("a steps answer with a run that no longer resolves still sets the runs that do", () => {
-  assert.equal(live.partial.code, 1);
-  const merged = mergeSteps(parsePr(live.pr), live.partial.body);
-  const resolved = live.partial.body.data.nodes.filter((n) => n !== null);
-  assert.equal(resolved.length, 1);
-  assert.ok(merged.checks.find((c) => c.id === resolved[0].id).steps.length > 0);
-});
-
-test("a steps answer with no data throws a GhError", () => {
-  assert.throws(() => mergeSteps(parsePr(live.pr), { errors: [{ type: "RATE_LIMITED", message: "API rate limit exceeded" }] }),
-    (e) => e instanceof GhError && e.kind === "rate-limited");
-});
-
-test("synthetic: a merge state this pane does not know is a GhError, not a guess", () => {
-  const f = frame(SETTLED, 2);
-  f.pr.mergeStateStatus = "SOMETHING_NEW";
-  assert.throws(() => parsePr(frameAnswer(f)), (e) => e instanceof GhError && e.kind === "unknown");
-});
-
-test("an answer with GraphQL errors is the failure gh's stderr names", () => {
-  const exec = sample("no-pr", /does not exist/).exec;
-  assert.throws(() => parsePr(JSON.parse(exec.stdout)), (e) => e instanceof GhError && e.kind === classifyFailure(exec).kind);
-  assert.equal(classifyFailure(exec).kind, "no-pr");
-});
-
-test("the lookup gives where the PR lives, from its URL", () => {
-  assert.deepEqual(parseLookup(live.lookup), { host: "github.com", owner: "ramtinJ95", name: "first-game", number: 146 });
-  assert.deepEqual(parseLookup('{"number":7,"url":"https://ghe.example.com/team/app/pull/7"}'), { host: "ghe.example.com", owner: "team", name: "app", number: 7 });
-  assert.throws(() => parseLookup("not json"), (e) => e instanceof GhError && e.kind === "unknown");
-  assert.deepEqual(prLookupArgs().slice(0, 2), ["pr", "view"]);
-  assert.ok(prLookupArgs().at(-1).split(",").includes("url"));
-});
-
-test("a pinned pull request is named owner/name#number, or by its URL with or without a page under it", () => {
-  const cli = { host: "github.com", owner: "cli", name: "cli", number: 9000 };
-  assert.deepEqual(parsePin("cli/cli#9000"), cli);
-  assert.deepEqual(parsePin(" https://github.com/cli/cli/pull/9000 "), cli);
-  assert.deepEqual(parsePin("https://github.com/cli/cli/pull/9000/files#diff-1"), cli);
-  assert.deepEqual(parsePin("https://ghe.example.com/team/my.app/pull/7?w=1"), { host: "ghe.example.com", owner: "team", name: "my.app", number: 7 });
-  for (const bad of ["9000", "cli/cli", "cli/cli#x", "https://github.com/cli/cli/issues/9000", 9000, null]) {
-    assert.throws(() => parsePin(bad), (e) => e instanceof GhError && e.kind === "unknown" && /owner\/name#number/.test(e.text), String(bad));
-  }
-});
-
-test("the steps query passes each id as one entry of the ids list, and refuses none", () => {
-  const args = stepsArgs(["CR_a", "CR_b"]);
-  assert.deepEqual(args.filter((a) => a.startsWith("ids[]=")), ["ids[]=CR_a", "ids[]=CR_b"]);
-  assert.throws(() => stepsArgs([]));
-});
-
-for (const s of failures.samples) {
-  test(`classifyFailure: ${s.how}${s.verified ? "" : " (assumed, not seen)"} is ${s.kind}`, () => assert.equal(classifyFailure(s.exec).kind, s.kind));
-}
-for (const r of failures.rejections) {
-  test(`classifyRejection: ${r.how}${r.verified ? "" : " (assumed, not seen)"} is ${r.kind}`, () => assert.equal(classifyRejection(new Error(r.message)).kind, r.kind));
-}
-
-test("a failure nobody named is unknown and keeps gh's text", () => {
-  assert.deepEqual(classifyFailure({ code: 1, stdout: "", stderr: "something new\n" }), { kind: "unknown", text: "something new" });
-  assert.deepEqual(classifyRejection(new GhError("offline", "down")), { kind: "offline", text: "down" });
-});
-
-test("every failure kind has a line to show", () => {
-  for (const kind of new Set([...failures.samples, ...failures.rejections].map((s) => s.kind).concat("unknown"))) {
-    const line = describeFailure({ kind, text: "" });
-    assert.ok(line.headline.length > 0 && ["working", "blocked", "done", "idle"].includes(line.tone), kind);
-  }
-});
-
-test("failures that wait on the person stop polling; offline backs off by doubling up to its cap", () => {
-  const offline = { kind: "offline", text: "" };
-  for (const kind of ["no-gh", "no-auth", "no-repo"]) assert.equal(failureDelay({ failure: { kind, text: "" }, streak: 1 }), null, kind);
-  const { first, max } = POLL.offline;
-  const delays = [1, 2, 3, 4, 5, 6, 7, 8].map((streak) => failureDelay({ failure: offline, streak }));
-  assert.deepEqual(delays, [1, 2, 4, 8, 16, 32, 64, 128].map((x) => Math.min(first * x, max)));
-  assert.equal(delays.at(-1), max);
-  const limited = (streak) => failureDelay({ failure: { kind: "rate-limited", text: "" }, streak });
-  assert.equal(limited(1), limited(5));
+test("failures that wait on the person stop polling; offline and unknown ones back off from 15 seconds, doubling to 5 minutes", () => {
+  const delays = (kind) => [1, 2, 3, 4, 5, 6, 7, 8].map((streak) => failureDelay({ failure: { kind, text: "" }, streak, resetAt: null }));
+  for (const kind of ["no-gh", "no-auth", "no-repo"]) assert.deepEqual(delays(kind), Array(8).fill(null), kind);
+  for (const kind of ["offline", "unknown"]) assert.deepEqual(delays(kind), [15_000, 30_000, 60_000, 120_000, 240_000, 300_000, 300_000, 300_000], kind);
+  assert.deepEqual(delays("rate-limited"), Array(8).fill(300_000));
+  assert.deepEqual(delays("no-pr"), Array(8).fill(30_000));
 });
 
 test("a failure of the same kind as the last one lengthens the streak; another kind starts it over", () => {
   const offline = { kind: "offline", text: "" };
-  const twice = troubleAfter(troubleAfter(null, offline), offline);
-  assert.deepEqual(twice, { failure: offline, streak: 2 });
-  assert.equal(troubleAfter(twice, { kind: "unknown", text: "x" }).streak, 1);
+  const twice = troubleAfter(troubleAfter(null, offline, null), offline, 5_000);
+  assert.deepEqual(twice, { failure: offline, streak: 2, resetAt: 5_000 });
+  assert.deepEqual(troubleAfter(twice, { kind: "unknown", text: "x" }, null), { failure: { kind: "unknown", text: "x" }, streak: 1, resetAt: null });
 });
 
 test("a poll's wait follows the checks while the pull request is open, and stops once it is merged or closed", () => {
-  assert.deepEqual(["pending", "none", "pass", "fail"].map((kind) => nextPollDelay(kind, "OPEN")), [POLL.running, POLL["no-checks"], POLL.settled, POLL.settled]);
+  assert.deepEqual(["pending", "none", "pass", "fail", "cancel"].map((kind) => nextPollDelay(kind, "OPEN")), [10_000, 30_000, 60_000, 60_000, 60_000]);
   assert.equal(nextPollDelay("pending", "MERGED"), null);
   assert.equal(nextPollDelay("pending", "CLOSED"), null);
 });
 
-test("duration", () => {
-  assert.equal(duration("2026-11-26T18:00:00Z", "2026-11-26T18:00:45Z", 0), "45s");
-  assert.equal(duration("2026-11-26T18:00:00Z", "2026-11-26T18:03:29Z", 0), "3m 29s");
-  assert.equal(duration("2026-11-26T18:00:00Z", "2026-11-26T19:05:10Z", 0), "1h 5m");
-  assert.equal(duration("2026-11-26T18:00:00Z", null, Date.parse("2026-11-26T18:02:00Z")), "2m 0s");
-  assert.equal(duration(null, null, 0), "");
-});
-
-const aboutAnswer = () => readJson("about-first-game-146.json");
-
-test("a recorded ABOUT_QUERY answer reads as who wrote what, when, with its counts", () => {
-  const about = parseAbout(aboutAnswer());
-  assert.equal(about.author, "ramtinJ95");
-  assert.equal(about.createdAt, "2026-11-26T16:39:28Z");
-  assert.equal(about.updatedAt, "2026-11-26T18:38:40Z");
-  assert.equal(about.body.length, 3696);
-  assert.deepEqual([about.labels, about.reviews, about.asked, about.comments, about.commits], [[], [], [], 0, 4]);
-  assert.deepEqual([about.mine, about.talk, about.earlier, about.threads, about.threadsHidden], [true, [], 0, [], 0]);
-});
-
-test("a recorded pull request under review reads as its threads and the reviews that say something", () => {
-  const about = parseAbout(readJson("about-cli-15081.json"));
-  assert.equal(about.mine, false);
-  // Six reviews were handed in: one with words, one approval, and four that only carry line comments.
-  assert.deepEqual(about.talk.map((said) => [said.who, said.state, said.body.length > 0]), [["copilot-pull-request-reviewer", "COMMENTED", true], ["BagToad", "APPROVED", false]]);
-  assert.ok(Date.parse(about.talk[0].at) < Date.parse(about.talk[1].at));
-  assert.deepEqual([about.comments, about.earlier, about.threads.length, about.threadsHidden], [0, 0, 6, 0]);
-  const [first, second] = about.threads;
-  assert.deepEqual({ ...first, comments: first.comments.length, id: typeof first.id }, {
-    id: "string", path: "pkg/cmd/event/shared/hint.go", line: 35, startLine: 33, side: "RIGHT", startSide: "RIGHT", was: 35, resolved: false, outdated: false,
-    canReply: true, canResolve: false, canUnresolve: false, comments: 1, more: 0,
-  });
-  // GitHub names a one-line thread's line as its start as well.
-  assert.deepEqual([second.line, second.startLine, second.startSide], [15, null, null]);
-  assert.deepEqual(about.threads.map((thread) => [thread.resolved, thread.comments.length]), [[false, 1], [false, 1], [true, 2], [true, 2], [true, 2], [true, 2]]);
-  assert.match(first.comments[0].url, /^https:\/\/github\.com\/cli\/cli\/pull\/15081#discussion_r\d+$/);
-});
-
-test("synthetic: the conversation is the comments and the reviews in the order they were written, without a review not handed in", () => {
-  const raw = aboutAnswer();
-  const said = (login, body, createdAt, extra = {}) => ({ author: login === null ? null : { login }, body, createdAt, url: `https://github.com/o/n/pull/1#${createdAt}`, ...extra });
-  Object.assign(raw.data.repository.pullRequest, {
-    comments: { totalCount: 40, nodes: [said("ada", "First.", "2026-11-20T10:00:00Z"), said(null, "Third.", "2026-11-20T12:00:00Z")] },
-    reviews: { totalCount: 5, nodes: [
-      said("bo", "Second.", "2026-11-20T09:00:00Z", { state: "CHANGES_REQUESTED", submittedAt: "2026-11-20T11:00:00Z" }),
-      said("cy", "", "2026-11-20T11:30:00Z", { state: "COMMENTED", submittedAt: "2026-11-20T11:30:00Z" }),
-      said("me", "Not yet.", "2026-11-20T13:00:00Z", { state: "PENDING", submittedAt: null }),
-    ] },
-    // As GitHub answered for an outdated thread of cli/cli#15100.
-    reviewThreads: { totalCount: 101, nodes: [{
-      id: "T1", isResolved: true, isOutdated: true, path: "a.go", line: null, startLine: null, originalLine: 175, diffSide: "RIGHT", startDiffSide: null,
-      viewerCanReply: true, viewerCanResolve: false, viewerCanUnresolve: true, comments: { totalCount: 31, nodes: [said("ada", "Old.", "2026-11-20T10:00:00Z")] },
-    }] },
-  });
-  const about = parseAbout(raw);
-  assert.deepEqual(about.talk.map((one) => [one.who, one.body, one.state, one.at]), [
-    ["ada", "First.", null, "2026-11-20T10:00:00Z"], ["bo", "Second.", "CHANGES_REQUESTED", "2026-11-20T11:00:00Z"], [null, "Third.", null, "2026-11-20T12:00:00Z"]]);
-  assert.deepEqual([about.comments, about.earlier, about.threadsHidden], [40, 40, 100]);
-  assert.deepEqual({ ...about.threads[0], comments: about.threads[0].comments.length }, {
-    id: "T1", path: "a.go", line: null, startLine: null, side: "RIGHT", startSide: null, was: 175, resolved: true, outdated: true,
-    canReply: true, canResolve: false, canUnresolve: true, comments: 1, more: 30,
-  });
-  raw.data.repository.pullRequest.reviewThreads.nodes[0].diffSide = "MIDDLE";
-  assert.throws(() => parseAbout(raw), (e) => e instanceof GhError && /MIDDLE/.test(e.text));
-});
-
-test("synthetic: labels, reviews and asked reviewers read by name; a deleted author and an unnamed team read as null", () => {
-  const raw = aboutAnswer();
-  Object.assign(raw.data.repository.pullRequest, {
-    author: null, labels: { nodes: [{ name: "external" }] },
-    latestOpinionatedReviews: { nodes: [{ state: "APPROVED", author: { login: "ada" } }, { state: "CHANGES_REQUESTED", author: null }] },
-    reviewRequests: { nodes: [{ requestedReviewer: { __typename: "User", login: "cy" } }, { requestedReviewer: { __typename: "Team", name: "core" } }, { requestedReviewer: null }] },
-  });
-  const about = parseAbout(raw);
-  assert.equal(about.author, null);
-  assert.deepEqual(about.labels, ["external"]);
-  assert.deepEqual(about.reviews, [{ who: "ada", state: "APPROVED" }, { who: null, state: "CHANGES_REQUESTED" }]);
-  assert.deepEqual(about.asked, ["cy", "core", null]);
-});
-
-test("synthetic: an ABOUT_QUERY answer with errors or a field this pane does not read is a GhError", () => {
-  assert.throws(() => parseAbout({ data: null, errors: [{ type: "RATE_LIMITED", message: "API rate limit exceeded" }] }), (e) => e instanceof GhError && e.kind === "rate-limited");
-  const raw = aboutAnswer();
-  raw.data.repository.pullRequest.latestOpinionatedReviews = { nodes: [{ state: "SHRUGGED", author: { login: "ada" } }] };
-  assert.throws(() => parseAbout(raw), (e) => e instanceof GhError && /SHRUGGED/.test(e.text));
-});

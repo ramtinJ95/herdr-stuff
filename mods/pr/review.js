@@ -1,11 +1,10 @@
 /**
- * What a person notes on a pull request's diff while reading it, and what the tab's agent is sent of it. The notes and
- * their words are those of the review-pane mod for Claude Code, which keeps them on a response; here they are on a diff.
- * GitHub's own review threads stand among the same lines, and the notes can be posted there as a review.
+ * What a person notes on a pull request's diff while reading it. The notes and their words are those of the review-pane
+ * mod for Claude Code, which keeps them on a response; here they are on a diff, and GitHub's own review threads stand
+ * among the same lines.
  */
-import { isLine, lastLine } from "./diff.js";
-import { byName, shortSha } from "./github.js";
-import { plural } from "./model.js";
+import { isLine } from "./diff.js";
+import { plural } from "./text.js";
 
 /** @typedef {import("./diff.js").DiffRow} DiffRow */
 /** @typedef {import("./github.js").Thread} Thread */
@@ -13,17 +12,14 @@ import { plural } from "./model.js";
 /**
  * Where an annotation points: a stretch of one file's diff rows as they were at commit `head`, with the words for the
  * stretch and the lines themselves, so it still reads after the pull request has moved on.
- * @typedef {{ path: string, head: string, start: number, end: number, where: string, quote: string[] }} Target
+ * @typedef {{ path: string, head: string, start: number, end: number, where: string, quote: string[] }} Spot
  */
 /**
  * `target` null is the pull request as a whole. `ask` says how sending a question went; a question without one was not sent.
- * @typedef {{ id: string, kind: Kind, target: Target | null, body: string, ask?: "sent" | { failed: string } }} Annotation
+ * @typedef {{ id: string, kind: Kind, target: Spot | null, body: string, ask?: "sent" | { failed: string } }} Annotation
  */
 /** @typedef {{ annotations: Annotation[], nextId: number }} Review */
-/** An annotation being typed: a new one, or `editingId`'s. @typedef {{ kind: Kind, target: Target | null, editingId: string | null }} Draft */
-/** One line comment of a review, as GitHub takes it. @typedef {{ path: string, startLine?: number, startSide?: "LEFT" | "RIGHT", line: number, side: "LEFT" | "RIGHT", body: string }} LineComment */
-/** A review as GitHub takes it. @typedef {{ commit: string, event: "COMMENT" | "APPROVE", body: string, comments: LineComment[] }} Posting */
-/** The pull request, as the agent is told of it. @typedef {{ ref: string, title: string, url: string, head: string }} Subject */
+/** An annotation being typed: a new one, or `editingId`'s. @typedef {{ kind: Kind, target: Spot | null, editingId: string | null }} Draft */
 
 /** How each kind is named and marked, in the order the gutter prefers one mark over another. */
 export const KINDS = /** @type {const} */ ({
@@ -37,35 +33,21 @@ const ORDER = Object.keys(KINDS);
 /** @type {Review} */
 export const EMPTY = { annotations: [], nextId: 1 };
 
-/** What a key does while the keyboard is in a diff. */
-export const REVIEW_KEYS = {
-  j: "down", down: "down", k: "up", up: "up", d: "half-down", u: "half-up", g: "first", b: "last", "shift-g": "last", v: "range",
-  c: "comment", s: "suggestion", i: "issue", a: "question", o: "overall", h: "previous", l: "next", r: "edit", x: "delete", y: "finish",
-  "shift-y": "post", "shift-a": "approve", z: "resolve", f: "forward",
-  enter: "confirm", n: "next-file", p: "previous-file", w: "window", escape: "escape", q: "close",
-};
-const MOVES = { down: () => 1, up: () => -1, "half-down": (page) => page, "half-up": (page) => -page, first: () => -Infinity, last: () => Infinity };
-
-export const isMove = (action) => action in MOVES;
+/** What `y` would send: everything but the questions, which went as they were asked. @param {Annotation[]} annotations */
+export const toSend = (annotations) => annotations.filter((one) => one.kind !== "question");
 
 /**
- * Whether an action is given with its key in the pane and never by a command from outside it: an approval, and the
- * Enter that confirms one. Like Merge, it is somebody looking at the pane who gives it.
- * @param {string} action @param {{ what: string, event?: string } | null} asking what Enter has been asked to confirm
+ * Whether the rows an annotation was written on are these rows: it was written at this commit, and the diff still has
+ * them. One that is not stands above the file's first line, is not under the cursor, and is posted with its lines quoted.
+ * @param {Spot} target @param {DiffRow[]} rows the rows of the target's file at `head`
  */
-export const keyOnly = (action, asking) => action === "approve" || (action === "confirm" && asking?.what === "post" && asking.event === "APPROVE");
-
-/** The row a move leaves the cursor on. `page` is half of what is on screen. */
-export const moveCursor = (action, cursor, count, page) => Math.max(0, Math.min(count - 1, cursor + MOVES[action](Math.max(1, page))));
-
-/** The rows a cursor and the other end of its range cover. */
-export const stretch = (cursor, anchor) => ({ start: Math.min(cursor, anchor ?? cursor), end: Math.max(cursor, anchor ?? cursor) });
+export const placedOn = (target, head, rows) => target.head === head && target.end < rows.length;
 
 const span = (first, last) => (first === last ? `line ${first}` : `lines ${first}-${last}`);
 const numbers = (rows, side) => rows.map((row) => row[side]).filter((n) => typeof n === "number");
 
 /** A stretch of rows in words: its lines in the file as it is now, or for removed lines alone where they were. @param {DiffRow[]} rows */
-export function whereOf(rows, start, end) {
+function whereOf(rows, start, end) {
   const picked = rows.slice(start, end + 1);
   const now = numbers(picked, "new");
   if (now.length > 0) return span(now[0], now.at(-1));
@@ -75,10 +57,10 @@ export function whereOf(rows, start, end) {
 
 const PREFIX = { add: "+", del: "-", same: " ", hunk: "", note: "\\ " };
 /** A stretch of rows as a diff writes them. @param {DiffRow[]} rows */
-const quoted = (rows, start, end) => rows.slice(start, end + 1).map((row) => PREFIX[row.kind] + row.text);
+export const quoted = (rows, start, end) => rows.slice(start, end + 1).map((row) => PREFIX[row.kind] + row.text);
 
-/** @param {DiffRow[]} rows @returns {Target} */
-export function targetOf(path, head, rows, start, end) {
+/** @param {DiffRow[]} rows @returns {Spot} */
+export function spotOf(path, head, rows, start, end) {
   return { path, head, start, end, where: whereOf(rows, start, end), quote: quoted(rows, start, end) };
 }
 
@@ -114,13 +96,6 @@ export function sortAnnotations(annotations, paths) {
     || (left.target === null || right.target === null ? 0 : left.target.start - right.target.start || left.target.end - right.target.end));
 }
 
-/** The annotation after or before the active one, around the ends. `ordered` is not empty. @param {Annotation[]} ordered */
-export function stepAnnotation(ordered, activeId, delta) {
-  const index = ordered.findIndex((one) => one.id === activeId);
-  const base = index < 0 ? (delta > 0 ? -1 : 0) : index;
-  return ordered[(base + delta + ordered.length) % ordered.length];
-}
-
 const rowAt = (rows, side, line) => rows.findIndex((row) => isLine(row) && row[side === "LEFT" ? "old" : "new"] === line);
 
 /**
@@ -144,11 +119,17 @@ export function threadWhere(thread, placed) {
   return `${span(thread.startLine ?? thread.line, thread.line)}${thread.side === "LEFT" ? " before the change" : ""}${placed ? "" : ", outside the diff shown"}`;
 }
 
+/** How a thread stands, in words; none for one that is open on lines as they are. @param {Thread} thread */
+export const threadState = (thread) => [...thread.resolved ? ["resolved"] : [], ...thread.outdated ? ["outdated"] : []];
+
 /**
  * @typedef {{ type: "line", row: DiffRow, index: number, mark: Kind | "thread" | null }
  *   | { type: "annotation", annotation: Annotation, moved: boolean }
  *   | { type: "thread", thread: Thread, placed: boolean }} Item
  */
+
+/** The id of the annotation or thread an item is. @param {Exclude<Item, { type: "line" }>} item */
+export const itemId = (item) => (item.type === "thread" ? item.thread.id : item.annotation.id);
 
 /**
  * A file's diff with what is noted on it among the lines: each annotation under the last line it covers, and each of
@@ -159,7 +140,7 @@ export function threadWhere(thread, placed) {
  */
 export function annotatedRows(rows, annotations, path, head, threads = []) {
   const mine = annotations.filter((one) => one.target?.path === path);
-  const here = (one) => one.target.head === head && one.target.end < rows.length;
+  const here = (one) => placedOn(one.target, head, rows);
   const placed = sortAnnotations(mine.filter(here), [path]);
   const said = threads.filter((thread) => thread.path === path).map((thread) => ({ thread, on: threadStretch(rows, thread) }));
   /** @type {Item[]} */
@@ -180,10 +161,9 @@ export function annotatedRows(rows, annotations, path, head, threads = []) {
 }
 
 /** The annotation a key acts on: the one stepped to, else the first on the cursor's row. @param {Annotation[]} annotations @returns {Annotation | null} */
-function activeAnnotation(annotations, activeId, path, head, cursor) {
-  return annotations.find((one) => one.id === activeId)
-    ?? sortAnnotations(annotations.filter((one) => one.target?.path === path && one.target.head === head && one.target.start <= cursor && one.target.end >= cursor), [path])[0]
-    ?? null;
+function activeAnnotation(annotations, activeId, path, head, rows, cursor) {
+  const under = (one) => one.target?.path === path && placedOn(one.target, head, rows) && one.target.start <= cursor && one.target.end >= cursor;
+  return annotations.find((one) => one.id === activeId) ?? sortAnnotations(annotations.filter(under), [path])[0] ?? null;
 }
 
 /**
@@ -195,7 +175,7 @@ function activeAnnotation(annotations, activeId, path, head, cursor) {
 export function activeNote(annotations, threads, activeId, path, head, rows, cursor) {
   const stepped = threads.find((thread) => thread.id === activeId);
   if (stepped !== undefined) return { annotation: null, thread: stepped };
-  const annotation = activeAnnotation(annotations, activeId, path, head, cursor);
+  const annotation = activeAnnotation(annotations, activeId, path, head, rows, cursor);
   if (annotation !== null) return { annotation, thread: null };
   const under = threads.find((thread) => {
     const on = thread.path === path ? threadStretch(rows, thread) : null;
@@ -213,7 +193,7 @@ export function activeNote(annotations, threads, activeId, path, head, rows, cur
  */
 export function stops(annotations, threads, paths, head, rowsOf) {
   const file = (path) => fileRank(paths, path);
-  const noted = sortAnnotations(annotations, paths).map(({ id, target }) => ({ id, path: target?.path ?? null, row: target === null || target.head !== head ? 0 : target.start }));
+  const noted = sortAnnotations(annotations, paths).map(({ id, target }) => ({ id, path: target?.path ?? null, row: target !== null && placedOn(target, head, rowsOf(target.path)) ? target.start : 0 }));
   const said = threads.map((thread) => ({ id: thread.id, path: thread.path, row: threadStretch(rowsOf(thread.path), thread)?.end ?? 0 }));
   return [...noted, ...said].sort((left, right) => file(left.path) - file(right.path) || left.row - right.row);
 }
@@ -241,156 +221,4 @@ export function askWords(one, sending) {
   if (sending.has(one.id)) return "asking…";
   if (one.ask === undefined) return "not asked";
   return one.ask === "sent" ? "asked" : `not asked: ${one.ask.failed}`;
-}
-
-/** What `y` would send: everything but the questions, which went as they were asked. @param {Annotation[]} annotations */
-export const toSend = (annotations) => annotations.filter((one) => one.kind !== "question");
-
-function fence(lines) {
-  const longest = Math.max(2, ...lines.map((line) => Math.max(0, ...(line.match(/`+/g) ?? []).map((run) => run.length))));
-  const ticks = "`".repeat(longest + 1);
-  return [`${ticks}diff`, ...lines, ticks];
-}
-
-const named = ({ ref, title, url }) => `pull request ${ref}, "${title}" (${url})`;
-
-/** Where an annotation points, for the agent. Lines of an earlier commit are said to be. @param {Target | null} target */
-function place(target, head) {
-  if (target === null) return "The pull request as a whole";
-  return `\`${target.path}\` ${target.where}${target.head === head ? "" : ` (as of commit ${shortSha(target.head)})`}`;
-}
-
-/**
- * The review the agent is sent: one numbered entry per annotation, each with the diff lines it is about. Empty when
- * there is nothing but questions.
- * @param {Subject} subject @param {Annotation[]} annotations @param {string[]} paths
- */
-export function formatReview(subject, annotations, paths) {
-  const ordered = sortAnnotations(toSend(annotations), paths);
-  if (ordered.length === 0) return "";
-  const output = [`I reviewed ${named(subject)} at commit ${shortSha(subject.head)}. Please address these annotations.`, ""];
-  ordered.forEach((one, index) => {
-    const marker = `${index + 1}. `;
-    const indent = (line) => (line === "" ? "" : " ".repeat(marker.length) + line);
-    output.push(`${marker}**[${KINDS[one.kind].label.toUpperCase()}]** ${place(one.target, subject.head)}`, "");
-    if (one.target !== null) output.push(...fence(one.target.quote).map(indent), "");
-    output.push(...one.body.split("\n").map(indent));
-    if (index < ordered.length - 1) output.push("");
-  });
-  return output.join("\n");
-}
-
-/** A question as the agent is sent it, at once: where it points, the lines and the question. @param {Subject} subject @param {Annotation} question */
-export function formatQuestion(subject, question) {
-  return [
-    `I am reading ${named(subject)} at commit ${shortSha(subject.head)} in a pane beside this terminal and have a question.`,
-    "",
-    `Location: ${place(question.target, subject.head)}`,
-    ...question.target === null ? [] : ["", "The lines the question is about:", ...fence(question.target.quote)],
-    "",
-    `Question: ${question.body}`,
-  ].join("\n");
-}
-
-/**
- * One of GitHub's threads as the agent is sent it: where it is, the lines it is on when the diff has them, and all that
- * was written in it.
- * @param {Subject} subject @param {Thread} thread @param {DiffRow[]} rows the rows of the thread's file
- */
-export function formatThread(subject, thread, rows) {
-  const on = threadStretch(rows, thread);
-  const state = [thread.resolved ? "resolved" : null, thread.outdated ? "outdated" : null].filter((word) => word !== null);
-  return [
-    `I am reading ${named(subject)} at commit ${shortSha(subject.head)} in a pane beside this terminal. Please address this review thread on it.`,
-    "",
-    `Location: \`${thread.path}\` ${threadWhere(thread, on !== null)}${state.length === 0 ? "" : ` (${state.join(", ")})`}`,
-    ...on === null ? [] : ["", "The lines it is on:", ...fence(quoted(rows, on.start, on.end))],
-    "",
-    `The thread${thread.comments.length === 0 ? "" : ` (${thread.comments[0].url})`}:`,
-    ...thread.comments.flatMap((said) => ["", `${byName(said.who)} wrote:`, ...said.body.split("\n").map((text) => (text === "" ? ">" : `> ${text}`))]),
-    ...thread.more === 0 ? [] : ["", `${plural(thread.more, "more comment")} on GitHub.`],
-  ].join("\n");
-}
-
-/**
- * Where on GitHub a stretch of diff rows is: the line it ends on and the side that line is on, and for more lines than
- * one where it starts. GitHub takes a stretch within one hunk, so one that crosses hunks keeps the part in its last;
- * null when it covers no line at all, only a hunk's header.
- * @param {DiffRow[]} rows @returns {Omit<LineComment, "path" | "body"> | null}
- */
-export function githubLines(rows, start, end) {
-  const line = (row) => row !== undefined && isLine(row);
-  let last = end;
-  while (last >= start && !line(rows[last])) last--;
-  if (last < start) return null;
-  let first = last;
-  while (first > start && line(rows[first - 1])) first--;
-  const side = rows[last].kind === "del" ? "LEFT" : "RIGHT";
-  // A stretch that ends on a removed line is on the old side throughout: an added line before it has no place there.
-  if (side === "LEFT") while (rows[first].old === null) first++;
-  const ends = side === "LEFT" ? rows[last].old : rows[last].new;
-  if (first === last) return { line: ends, side };
-  const startSide = side === "LEFT" || rows[first].kind === "del" ? "LEFT" : "RIGHT";
-  return { startLine: startSide === "LEFT" ? rows[first].old : rows[first].new, startSide, line: ends, side };
-}
-
-/**
- * The annotations as a review for GitHub: one line comment each, on the lines it was written on. What has no line there
- * goes in the review's own words, with the lines quoted: a note on the whole pull request, one written at an earlier
- * commit, one on a hunk's header. Questions are left out, as they are from the review the agent is sent.
- * @param {Annotation[]} annotations @param {string[]} paths @param {(path: string) => DiffRow[]} rowsOf a file's diff rows at `head`
- * @param {Posting["event"]} event @returns {Posting}
- */
-export function postingOf(annotations, paths, head, rowsOf, event) {
-  const comments = [], loose = [];
-  for (const one of sortAnnotations(toSend(annotations), paths)) {
-    const { target } = one;
-    const lines = target === null || target.head !== head ? null : githubLines(rowsOf(target.path), target.start, target.end);
-    const label = KINDS[one.kind].label;
-    if (lines !== null) comments.push({ path: target.path, ...lines, body: one.kind === "comment" ? one.body : `**${label}:** ${one.body}` });
-    else if (target === null) loose.push(one.body);
-    else loose.push([`**${label}** on ${place(target, head)}:`, "", ...fence(target.quote), "", one.body].join("\n"));
-  }
-  return { commit: head, event, body: loose.join("\n\n"), comments };
-}
-
-/**
- * Why a review cannot be posted on GitHub right now, or null when it can. An approval needs no annotations, but is
- * not GitHub's to take from the person who opened the pull request, nor on one that is no longer open.
- * @param {{ event: Posting["event"], count: number, live: boolean, busy: boolean, mine: boolean | null, state: string }} at
- *   `mine` is null until GitHub has said who opened it, which comes with the pull request's id, a review's address
- */
-export function postBlock({ event, count, live, busy, mine, state }) {
-  if (busy) return "A review is on its way to GitHub.";
-  if (!live) return "Not until GitHub answers again.";
-  if (mine === null) return "Still reading what is on GitHub: try again in a moment.";
-  if (event === "COMMENT") return count === 0 ? "Nothing to post yet: c, s or i notes the line." : null;
-  if (state !== "OPEN") return "It is no longer open: there is nothing to approve.";
-  return mine ? "GitHub does not take your approval of your own pull request." : null;
-}
-
-/**
- * The terminal the tab's agent runs in, as `hc send` names it, with a name for people; or why there is none to send to.
- * The pane's own terminal comes first when it runs an agent. A shell is never sent to: it would run the words.
- * @param {import("herdr").PaneInfo[]} mine the tab's terminal panes
- * @returns {{ terminal: string, name: string } | { terminal: null, name: "the agent", why: string }}
- */
-export function agentOf(mine, follow, machine) {
-  const agents = mine.filter((p) => p.terminal !== null && (p.program?.agent === true || p.status !== null));
-  const pane = agents.find((p) => p.pane === follow) ?? agents.find((p) => p.focused) ?? agents[0];
-  if (pane === undefined) return { terminal: null, name: "the agent", why: "No agent in this tab to send it to." };
-  return { terminal: machine === null ? pane.terminal : `${machine}/${pane.terminal}`, name: pane.name ?? pane.program?.name ?? pane.terminal };
-}
-
-/**
- * How an `hc send` went. Piped, hc says what went wrong as JSON on stderr; anything else it wrote is given as it is.
- * @param {{ code: number, stderr: string }} result @returns {"sent" | { failed: string }}
- */
-export function sendResult({ code, stderr }) {
-  if (code === 0) return "sent";
-  try {
-    return { failed: String(JSON.parse(stderr).error.message) };
-  } catch {
-    return { failed: lastLine(stderr) || `hc send exited with ${code}` };
-  }
 }

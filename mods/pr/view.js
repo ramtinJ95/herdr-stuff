@@ -1,9 +1,10 @@
-import { byName, firstLine } from "./github.js";
-import { POLL, describeFailure, groups, plural } from "./model.js";
+import { byName } from "./github.js";
+import { failureDelay, groups } from "./model.js";
+import { firstLine, plural } from "./text.js";
 
 /** @typedef {import("./github.js").Snapshot} Snapshot */
 /** @typedef {import("./github.js").Check} Check */
-/** @typedef {import("./github.js").Failure} Failure */
+/** @typedef {import("./model.js").Trouble} Trouble */
 /** @typedef {ReturnType<typeof import("./model.js").summarize>} Summary */
 /** @typedef {ReturnType<typeof groups>[number]} Group */
 /** @typedef {import("./github.js").File} File */
@@ -16,7 +17,9 @@ import { POLL, describeFailure, groups, plural } from "./model.js";
 
 const PASSED_SHOWN = 8;
 /** The list is drawn whole, so a pull request with more files than this shows the first and counts the rest. */
-export const FILES_SHOWN = 300;
+const FILES_SHOWN = 300;
+/** What a file row's key starts with, before its path. */
+const FILE_KEY = "file:";
 
 function opensByDefault(group, all) {
   if (group.key === "skipping") return false;
@@ -25,7 +28,7 @@ function opensByDefault(group, all) {
 }
 
 /** @returns {Row[]} */
-export function rowsOf(snapshot, folds) {
+function rowsOf(snapshot, folds) {
   const all = groups(snapshot);
   const rows = all.flatMap((group) => {
     const open = folds.get(group.key) ?? opensByDefault(group, all);
@@ -46,7 +49,7 @@ export function paneRows(snapshot, { folds, aboutOpen, filesOpen, files }) {
   return [
     { kind: "about", key: "about", open: aboutOpen },
     { kind: "files", key: "files", open: filesOpen, count: snapshot.pr.files },
-    ...listed.slice(0, FILES_SHOWN).map((file) => /** @type {Row} */ ({ kind: "file", key: `file:${file.path}`, file })),
+    ...listed.slice(0, FILES_SHOWN).map((file) => /** @type {Row} */ ({ kind: "file", key: FILE_KEY + file.path, file })),
     .../** @type {Row[]} */ (listed.length > FILES_SHOWN ? [{ kind: "more-files", key: "more-files", count: listed.length - FILES_SHOWN }] : []),
     ...rowsOf(snapshot, folds),
   ];
@@ -65,7 +68,7 @@ export function rowUrl(row, snapshot) {
 export function rowIndex(rows, key) {
   const own = rows.findIndex((r) => r.key === key);
   if (own >= 0) return own;
-  const folded = rows.findIndex((r) => (r.kind === "group" && r.group.checks.some((c) => c.id === key)) || (r.kind === "files" && String(key).startsWith("file:")));
+  const folded = rows.findIndex((r) => (r.kind === "group" && r.group.checks.some((c) => c.id === key)) || (r.kind === "files" && String(key).startsWith(FILE_KEY)));
   if (folded >= 0) return folded;
   return Math.max(0, rows.findIndex((r) => r.kind === "check"));
 }
@@ -89,20 +92,17 @@ export function detailOf(rows, key, wide, expanded) {
 }
 
 const STAGE_WORDS = { open: "Open", draft: "Draft" };
-const CI_HEADLINE = ["fail", "pending", "cancel"];
 
 export function headlineOf(summary) {
   const stage = STAGE_WORDS[summary.stage];
-  return stage === undefined || summary.headline === stage ? summary.headline : `${stage} · ${summary.headline}`;
+  return stage === undefined || summary.lead === summary.stage ? summary.headline : `${stage} · ${summary.headline}`;
 }
 
 export function blockerWords(summary) {
-  const { merge, ci } = summary;
-  if (merge.kind === "ready") return merge.note !== null && !CI_HEADLINE.includes(ci.kind) ? [merge.note] : [];
+  const { merge, lead } = summary;
+  if (merge.kind === "ready") return merge.note !== null && lead !== "checks" ? [merge.note] : [];
   if (merge.kind !== "blocked") return [];
-  return merge.blockers.filter((b) => b.label !== summary.headline
-    && !(b.kind === "draft" && summary.stage === "draft")
-    && !(b.kind.startsWith("checks-") && CI_HEADLINE.includes(ci.kind))).map((b) => b.label);
+  return merge.blockers.filter((b) => b.kind !== lead && b.kind !== summary.stage && !(b.checks && lead === "checks")).map((b) => b.label);
 }
 
 export function currentStep(check) {
@@ -117,27 +117,41 @@ export const stepLink = (check, step) => (check.link === null ? null : `${check.
 const pad = (n) => String(n).padStart(2, "0");
 const clock = (ms) => `${pad(new Date(ms).getHours())}:${pad(new Date(ms).getMinutes())}`;
 
-const FIXES = {
-  "no-gh": "Install the GitHub CLI, then run `gh auth login` in a terminal.",
-  "no-auth": "Run `gh auth login` in a terminal.",
-  offline: "The pane tries again by itself.",
+/**
+ * What each kind of failure says in place of a pull request. `fix` is what to do about it, from the trouble and the
+ * time; `pinned` is the headline of a pane that was given its pull request, in place of the words about "this branch".
+ * @type {Record<import("./github.js").FailureKind, { headline: string, tone: import("./model.js").Tone,
+ *   fix?: (trouble: Trouble, now: number) => string | null, pinned?: (pin: string) => string }>}
+ */
+const FAILURES = {
+  "no-gh": { headline: "GitHub CLI (gh) not found", tone: "blocked", fix: () => "Install the GitHub CLI, then run `gh auth login` in a terminal." },
+  "no-auth": { headline: "gh is not logged in", tone: "blocked", fix: () => "Run `gh auth login` in a terminal." },
+  "no-repo": { headline: "Not a GitHub repository", tone: "idle", pinned: (pin) => `gh cannot see the repository of ${pin}` },
+  "no-pr": { headline: "No pull request for this branch", tone: "idle", pinned: (pin) => `No pull request ${pin}` },
+  offline: { headline: "Cannot reach GitHub", tone: "idle", fix: () => "The pane tries again by itself." },
+  "rate-limited": { headline: "GitHub rate limit reached", tone: "idle",
+    fix: (trouble, now) => (trouble.resetAt !== null && trouble.resetAt > now ? `It resets at ${clock(trouble.resetAt)}.` : `The pane tries again in ${failureDelay(trouble) / 60_000} minutes.`) },
+  unknown: { headline: "gh failed", tone: "blocked", fix: ({ failure }) => firstLine(failure.text).trim() || null },
 };
-
-/** What a pinned pane says in place of the lines about "this branch". */
-const PINNED = { "no-pr": (pin) => `No pull request ${pin}`, "no-repo": (pin) => `gh cannot see the repository of ${pin}` };
 
 /**
  * `pin` names the pull request a pinned pane was given, null for a pane that follows its tab. `named` says the headline
  * names that pull request itself, so nothing else need say where the pane looked.
+ * @param {Trouble} trouble @param {string | null} pin
  */
-export function failureLines(failure, resetAt, now, pin = null) {
-  const { tone, headline: plain } = describeFailure(failure);
-  const named = pin !== null && PINNED[failure.kind] !== undefined;
-  const headline = named ? PINNED[failure.kind](pin) : plain;
-  if (failure.kind === "rate-limited") {
-    return { headline, tone, named, fix: resetAt !== null && resetAt > now ? `It resets at ${clock(resetAt)}.` : `The pane tries again in ${POLL["rate-limited"] / 60_000} minutes.` };
-  }
-  return { headline, tone, named, fix: FIXES[failure.kind] ?? (failure.kind === "unknown" ? firstLine(failure.text).trim() || null : null) };
+export function failureLines(trouble, now, pin) {
+  const { headline, tone, fix, pinned } = FAILURES[trouble.failure.kind];
+  const named = pin !== null && pinned !== undefined;
+  return { headline: named ? pinned(pin) : headline, tone, named, fix: fix?.(trouble, now) ?? null };
+}
+
+/** "45s", "3m 29s", "1h 5m"; a check still running counts to `now` (ms). Empty when it has not started. */
+export function duration(startedAt, completedAt, now) {
+  if (startedAt === null) return "";
+  const s = Math.max(0, Math.round(((completedAt === null ? now : Date.parse(completedAt)) - Date.parse(startedAt)) / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 }
 
 export function ago(ms, now) {
@@ -148,9 +162,6 @@ export function ago(ms, now) {
   if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
   return `${plural(Math.floor(s / 86400), "day")} ago`;
 }
-
-/** Whether what is shown is GitHub's latest answer: not a saved copy, not the last good one after a failed poll. */
-export const liveShown = (shown, trouble) => shown.source === "live" && trouble === null;
 
 /** Who opened the PR and when, and how much is on it. @param {About} about */
 export const aboutLine = (about, now) =>

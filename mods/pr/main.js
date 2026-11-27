@@ -1,185 +1,115 @@
 import { View } from "gpui-kit";
 import { InputState, ScrollHandle, VirtualListScrollHandle } from "gpui-base";
-import { appHome, checking, closeOverlay, exec, focused, hc, nextCommand, openOverlay, panes, props, readTextFile, run, setShared, settings, shared, spaces, window as appWindow } from "herdr";
-import * as fs from "fs/promises";
-import { aboutArgs, filesArgs, prArgs, replyArgs, resolveArgs, reviewArgs, stepsArgs } from "./query.js";
-import { classifyFailure, classifyRejection, firstLine, frameAnswer, mergeSteps, parseAbout, parseFiles, parseLookup, parsePin, parsePr, prLookupArgs, prRef, readAnswer } from "./github.js";
-import { failureDelay, keepSteps, nextPollDelay, offersMerge, plural, stepsWanted, summarize, troubleAfter } from "./model.js";
-import { detailOf, liveShown, moveSelection, paneRows, rowIndex, rowUrl, selectedRow } from "./view.js";
-import { coloursOf, diffOf, helperInput, noColours, plainNote, rowLines } from "./diff.js";
-import { confirmMerge, mergeMethod, mergeOffer, mergePress } from "./merge.js";
-import { EMPTY, KINDS, REVIEW_KEYS, activeNote, agentOf, annotatedRows, dropAnnotation, formatQuestion, formatReview, formatThread, isMove, keyOnly, markAsked, moveCursor,
-  postBlock, postingOf, saveDraft, sendResult, stepAnnotation, stops, stretch, targetOf, toSend } from "./review.js";
+import { checking, closeOverlay, focused, hc, nextCommand, openOverlay, panes, props, run, setShared, settings, shared, spaces } from "herdr";
+import { replyArgs, resolveArgs, reviewArgs } from "./query.js";
+import { prKey, prRef, prUrl } from "./github.js";
+import { offersMerge, summarize } from "./model.js";
+import { detailOf, moveSelection, paneRows, rowIndex, rowUrl, selectedRow } from "./view.js";
+import { rowLines } from "./diff.js";
+import { colouredDiff } from "./pierre/colours.js";
+import { confirmMerge, mergeOffer, mergePress } from "./merge.js";
+import { EMPTY, activeNote, annotatedRows, itemId, markAsked, toSend } from "./review.js";
+import { READ_KEYS, isMove, readClick, readStep, retryReply, startReading, typing } from "./reading.js";
+import { agentOf, formatQuestion, formatReview, formatThread, postBlock, postingOf, sendResult } from "./send.js";
+import { liveShown, sceneOf } from "./state.js";
+import { errorText, firstLine, oneLine, plural } from "./text.js";
+import { handOver, takeOver } from "./cache.js";
+import { Watch, gh } from "./watch.js";
 import { WIDE_PX, drawPane, lineHeight, wrapColumns } from "./draw.js";
 
-/** @typedef {import("./github.js").Snapshot} Snapshot */
-/** @typedef {import("./github.js").About} About */
 /** @typedef {import("./github.js").File} File */
-/** @typedef {import("./github.js").Target} Target */
-/** @typedef {import("./model.js").Trouble} Trouble */
-/** @typedef {import("./merge.js").MergeMethod} MergeMethod */
+/** @typedef {import("./github.js").Thread} Thread */
+/** @typedef {import("./state.js").Showing} Showing */
 /** @typedef {import("./merge.js").MergeUi} MergeUi */
-/** Where gh runs. A pinned pane has no folder or branch: `pin` names the pull request it was given. @typedef {{ cwd: string | null, branch: string | null, machine: string | null, pin: string | null }} Place */
+/** @typedef {import("./reading.js").Reading} Reading */
+/** @typedef {import("./review.js").Review} Review */
 /**
- * What is drawn of a pull request: the poll's snapshot, and the description and the files read apart from it.
- * `files` are those of the head commit named beside them, and are not saved.
- * @typedef {{ snapshot: Snapshot, about: About | null, files: { head: string, list: File[], colours?: import("./diff.js").Colours } | null, fetchedAt: number, source: "cache" | "live" | "replay" }} Shown
- */
-/**
- * `method` is undefined until GitHub has answered with the repository's merge methods.
- * @typedef {{ phase: "showing", place: Place, target: Target, localHead: string | null, method: MergeMethod | null | undefined,
- *   shown: Shown | null, trouble: Trouble | null, stepsError: string | null, aboutError: string | null, filesError: string | null }} Showing
- */
-/**
- * @typedef {{ phase: "idle" }
- *   | { phase: "locating", place: Place, shown: Shown | null }
- *   | { phase: "failed", place: Place, trouble: Trouble }
- *   | { phase: "no-pr", place: Place }
- *   | Showing
- *   | { phase: "replay", file: string, shown: Shown | null, trouble: Trouble | null }
- *   | { phase: "bad-pin", text: string }} State
+ * What the pane holds of the pull request it is looking at, made anew when it turns to another. `reading` is the
+ * keyboard's place in a diff, null while it is in the list; `notice` is a line under the diff on what the last key did
+ * or could not do. `diffs` are the files' diffs ready to draw by path, each parsed once per `files` as it is shown,
+ * with why it is plain when it is, null for a file without a diff. `laid` is the diff drawn with the annotations and
+ * threads among its rows, and `listed` that layout with each row's height at the width it is drawn at.
+ * @typedef {{ selected: string | null, folds: Map<string, boolean>, expanded: boolean, merge: MergeUi, reading: Reading | null, notice: string | null,
+ *   diffs: { files: object, byPath: Map<string, ReturnType<typeof colouredDiff> | null> } | null, laid: any, listed: any }} Look
  */
 
 const TICK_MS = 1_000;
-const STEPS_MAX = 6;
-const GH_TIMEOUT_MS = 20_000;
-const HELPER_TIMEOUT_MS = 60_000;
-const CACHE_KEPT = 20;
-const PLACES_KEPT = 50;
-const CACHE_ORDER = "pr:v1:order";
-const PLACES = "pr:v1:places";
-/** A pull request's name in what is stored. GitHub reads an owner and a repository in any case, so one case is kept. */
-const prKey = (target) => `${target.host}/${target.owner}/${target.name}#${target.number}`.toLowerCase();
-const cacheKey = (target) => `pr:v1:${prKey(target)}`;
 /**
  * What every copy of the pane agrees on is in Herdr's shared state. localStorage is one store per mod and props, so a
- * pane that follows its tab, a pane pinned to a pull request and a window each have their own: it holds only the cache.
+ * pane that follows its tab, a pane pinned to a pull request and a window each have their own.
  */
 const VIEW = "pr.view";
 const REVIEWS = "pr.reviews";
 /** Which of Description and Files are open, and the list's width beside a diff or a check's steps. @returns {{ aboutOpen: boolean, filesOpen: boolean, listWidth: number }} */
 const view = () => ({ aboutOpen: true, filesOpen: false, listWidth: 320, .../** @type {object} */ (shared(VIEW) ?? {}) });
-/** The annotations on each pull request, by `prKey`. @returns {Record<string, import("./review.js").Review>} */
+/** The annotations on each pull request, by `prKey`. @returns {Record<string, Review>} */
 const reviews = () => /** @type {any} */ (shared(REVIEWS) ?? {});
-const placeKey = (place) => (place === null ? null : JSON.stringify([place.machine, place.cwd, place.branch]));
-const after = (ms) => (ms === null ? null : Date.now() + ms);
-const save = (key, value) => localStorage.setItem(key, JSON.stringify(value));
 const IDLE = /** @type {MergeUi} */ ({ step: "idle" });
-/** What gh said went wrong, on one line: GitHub's reasons for refusing a review come one to a line. */
-const oneLine = (text) => text.split("\n").map((part) => part.trim()).filter((part) => part !== "").join(" ");
-/** One list for "no threads", so that a diff laid out without any is not laid out again at each draw. */
-const NO_THREADS = [];
 const KEYS = { j: "down", down: "down", k: "up", up: "up", enter: "toggle", space: "toggle", l: "read", right: "read", o: "open", r: "refresh", w: "window", escape: "escape", q: "close" };
 /** What `herdr-app do pr.<command>` and key bindings may do. Merge is not here: it takes two presses in the pane, by someone looking at it. */
 const COMMANDS = new Set(["down", "up", "toggle", "read", "open", "refresh", "window", "escape", "close"]);
-/** The same, while the keyboard is in a diff: what its keys do, but for what `keyOnly` keeps to the keys. */
-const READ_COMMANDS = new Set(Object.values(REVIEW_KEYS));
+/** The same, while the keyboard is in a diff: what its keys do. */
+const READ_COMMANDS = new Set(Object.values(READ_KEYS));
 /** A length the app reports, in the px the pane lays out in. */
 const unzoomed = (px) => px / Number(settings().zoom ?? 1);
-/**
- * What Enter is asked to confirm in a diff: the review to the tab's agent, the review to GitHub with its verdict, or one
- * of GitHub's threads to the agent.
- * @typedef {{ what: "send" } | { what: "post", event: "COMMENT" | "APPROVE" } | { what: "forward", thread: string }} Asking
- */
-/** The copies of this mod that float in a window. While there is one, the commands are its own: a pane under it leaves them be. */
+/** The copies of this mod that float in a window. While there is one, it is the copy in front: a pane under it neither asks GitHub nor takes commands. */
 const WINDOWS = new Set();
-/**
- * What a pane has loaded of the pull request it opens a window on, and its place in the diff, for the window to start
- * from in place of asking GitHub again. Module code is shared by a mod's copies; the window takes it as it starts.
- * @type {{ key: string, shown: Shown, reading: { path: string, cursor: number, anchor: number | null } | null } | null}
- */
-let handed = null;
+/** @type {Set<string>} */
+const NOTHING = new Set();
+
+/** Where a pane is in a pull request as it opens a window on it. @typedef {{ selected: string, reading: Reading | null }} First */
+
+/** @param {First | null} first what a window opens on @returns {Look} */
+const freshLook = (first) =>
+  ({ selected: first?.selected ?? null, folds: new Map(), expanded: first !== null, merge: IDLE, reading: first?.reading ?? null, notice: null, diffs: null, laid: null, listed: null });
 
 export default class PullRequest extends View {
   init(_props, cx) {
     // Set by the first draw: a pane is drawn only while its tab is the one shown, and init also runs for a pane in another tab.
     /** @type {string | null} */
     this.tab = null;
-    const { replay = null, pr = null, overlay = null, follow = null, file = null } = props() ?? {};
+    const { replay = null, pr = null, overlay = null, follow = null } = props() ?? {};
     /** The window this copy floats in, when a pane opened it there with `w`; null in a pane. @type {string | null} */
     this.overlay = overlay;
-    /** What a window opens on: the file its pane had selected, and what the pane handed it. */
-    this.first = file === null ? null : `file:${file}`;
-    this.handed = overlay === null ? null : handed;
-    if (overlay !== null) handed = null;
-    /** @type {State} */
-    this.state = replay === null ? { phase: "idle" } : { phase: "replay", file: replay, shown: null, trouble: null };
-    /** The pull request this pane was given to show, in place of the one its tab is on. @type {Target | null} */
-    this.pin = null;
-    if (pr !== null && replay === null) {
-      try {
-        this.pin = parsePin(pr);
-      } catch (e) {
-        this.state = { phase: "bad-pin", text: classifyRejection(e).text };
-      }
-    }
-    /** @type {MergeUi} */
-    this.merge = IDLE;
+    /** The terminal pane this one follows in its tab. */
     this.follow = follow;
-    this.gen = 0;
-    /** When the next poll or lookup is due, in ms; null is "not until asked". */
-    this.due = null;
-    /** Set when what is wanted beside the snapshot may have changed: `wanted` moved, or the pane wrote to GitHub. */
-    this.more = false;
-    /** What decides which parts are wanted, as last seen: which of Description and Files are open, and the check whose steps are drawn. */
-    this.wanted = null;
-    this.busy = false;
-    this.wasShown = false;
-    this.resetAt = null;
-    this.selected = null;
-    this.folds = new Map();
+    this.watch = new Watch({ replay, pr });
+    /** What a window opens on: the file its pane had selected, and the keyboard's place in its diff. @type {First | null} */
+    this.first = overlay === null || this.watch.pin === null ? null : takeOver(this.watch.pin);
+    this.look = freshLook(this.first);
     /**
-     * The files' diffs ready to draw by path, each parsed once per `files` as it is shown, with why it is plain when it
-     * is; null for a file without a diff.
-     * @type {{ files: Shown["files"], byPath: Map<string, (ReturnType<typeof diffOf> & { why: string | null }) | null> } | null}
+     * What is on its way out of the pane, by the pull request it left from (`prKey`): the ids of questions and of
+     * threads written to, and "send", "post" or "forward". It outlasts a turn away and back, so nothing goes twice.
+     * @type {Map<string, Set<string>>}
      */
-    this.diffs = null;
-    this.expanded = file !== null;
-    this.wide = false;
-    this.handle = cx.focus_handle();
-    this.scroll = ScrollHandle.new();
-    /** The annotations last read from the shared state, and the stored text they were read from. @type {import("./review.js").Review} */
+    this.going = new Map();
+    /** The annotations last read from the shared state, and the stored text they were read from. @type {Review} */
     this.review = EMPTY;
     this.reviewStored = null;
-    /** The keyboard's place in the diff of the file at `path`; null while it is in the list. @type {{ path: string, cursor: number, anchor: number | null } | null} */
-    this.reading = null;
-    /** What is being typed in the field: an annotation, or a reply to one of GitHub's threads. `failed` is why a reply's last try did not go. @type {import("./review.js").Draft | { reply: import("./github.js").Thread, failed: string | null } | null} */
-    this.draft = null;
-    this.typing = false;
-    /** The annotation or thread stepped to or clicked, by id. */
-    this.activeId = null;
-    /** A line under the diff on what the last key did or could not do. */
-    this.notice = null;
-    /** `y`, `Y`, `A` or `f` was pressed: Enter does it. @type {Asking | null} */
-    this.confirming = null;
-    /** What is on its way: the ids of questions and of threads written to, and what Enter confirmed: "send", "post" or "forward". */
-    this.sending = new Set();
-    /** Set when the pane has written to GitHub, or was asked to look again: what people wrote there is then read again whatever its date. */
-    this.stale = false;
+    this.wide = false;
     this.shift = false;
     /** A press began on a window's header, which it is dragged by. */
     this.grip = false;
-    /** The diff's rows with the annotations and threads among them, laid out once per diff and what is noted on it. */
-    this.laid = null;
-    /** That layout with each row's height at the width the diff is drawn at. */
-    this.listed = null;
-    this.lines = VirtualListScrollHandle.new();
-    /** The width the diff is drawn at, in px; null until it has been drawn once. */
+    /** The width and height the diff is drawn at, in px; null until it has been drawn once. */
     this.diffWidth = null;
     this.diffHeight = null;
+    this.handle = cx.focus_handle();
+    this.scroll = ScrollHandle.new();
+    this.lines = VirtualListScrollHandle.new();
+    this.fieldFocused = false;
     this.input = InputState.new({ placeholder: "" });
-    this.input.on("submit", (_e, cx) => this.submit(cx));
+    this.input.on("submit", (_e, cx) => this.read("confirm", cx));
     this.input.on("focus", (_e, cx) => {
-      this.typing = true;
+      this.fieldFocused = true;
       cx.notify();
     });
     this.input.on("blur", (_e, cx) => {
-      this.typing = false;
+      this.fieldFocused = false;
       cx.notify();
     });
     if (checking()) return;
     if (overlay !== null) WINDOWS.add(this);
-    if (replay !== null) cx.spawn(async (cx) => this.readReplay(cx, replay));
+    this.watch.start(cx);
     cx.timer.every(TICK_MS, (cx) => {
       if (this.track(cx)) cx.notify();
     });
@@ -187,31 +117,15 @@ export default class PullRequest extends View {
       for (;;) {
         const command = await nextCommand();
         if (command === "focus") this.handle.focus();
-        else if (focused()?.tab === this.tab && (this.overlay !== null || WINDOWS.size === 0)) this.command(command, cx);
+        else if (this.inFront()) this.command(command, cx);
         cx.notify();
       }
     });
   }
 
-  /** A command from outside the pane: `herdr-app do pr.<command>`, or a key bound to one. */
-  command(action, cx) {
-    if (this.reader() === null || !READ_COMMANDS.has(action)) {
-      if (COMMANDS.has(action)) this.act(action, cx);
-    } else if (keyOnly(action, this.confirming)) {
-      this.confirming = null;
-      this.notice = "An approval is given with its keys in the pane.";
-    } else if (this.draft === null || action === "confirm" || action === "escape") {
-      // While the field is open the keys are its own, and so are the commands: only what Enter and Esc do there.
-      this.readAct(action, cx);
-    }
-  }
-
-  followed() {
-    const mine = panes().filter((p) => p.tab === this.tab && p.terminal);
-    const pane = mine.find((p) => p.focused) ?? mine.find((p) => p.pane === this.follow) ?? mine[0];
-    if (!pane?.cwd) return null;
-    this.follow = pane.pane;
-    return { cwd: pane.cwd, branch: pane.branch, machine: this.machine(), pin: null };
+  /** Whether this copy is the one in front in the tab shown: a window covers the panes under it. */
+  inFront() {
+    return focused()?.tab === this.tab && (this.overlay !== null || WINDOWS.size === 0);
   }
 
   /** The machine the tab's space lives on, where gh runs. */
@@ -219,389 +133,50 @@ export default class PullRequest extends View {
     return spaces().find((s) => s.tabs.some((tab) => tab.id === this.tab))?.machine ?? null;
   }
 
-  /** @returns {Place} */
-  pinned() {
-    return { cwd: null, branch: null, machine: this.machine(), pin: prRef(this.pin) };
+  /** Where the pane is: at the pull request it was given, else where the terminal it follows is. @returns {import("./state.js").Place | null} */
+  place() {
+    if (this.watch.pin !== null) return { cwd: null, branch: null, machine: this.machine(), pin: prRef(this.watch.pin) };
+    const mine = panes().filter((p) => p.tab === this.tab && p.terminal);
+    const pane = mine.find((p) => p.focused) ?? mine.find((p) => p.pane === this.follow) ?? mine[0];
+    if (!pane?.cwd) return null;
+    this.follow = pane.pane;
+    return { cwd: pane.cwd, branch: pane.branch, machine: this.machine(), pin: null };
   }
 
-  /** @returns {Showing} */
-  opening(place, target) {
-    // What a pane handed its window is shown as a cached copy is: at once, and not to be acted on until GitHub has answered here.
-    const shown = this.handed?.key === prKey(target) ? { ...this.handed.shown, source: /** @type {const} */ ("cache") } : this.cached(target);
-    return { phase: "showing", place, target, localHead: null, method: undefined, shown, trouble: null, stepsError: null, aboutError: null, filesError: null };
-  }
-
+  /** Looks at where the pane is and has the watch run what is due. Says whether anything changed that is to be drawn. */
   track(cx) {
-    if (this.tab === null || this.state.phase === "replay" || this.state.phase === "bad-pin") return false;
-    const place = this.pin === null ? this.followed() : this.pinned();
-    const moved = placeKey(place) !== placeKey("place" in this.state ? this.state.place : null);
+    if (this.tab === null) return false;
+    const moved = this.watch.turn(this.place());
     if (moved) {
-      this.gen++;
-      this.state = place === null ? { phase: "idle" } : this.pin === null ? { phase: "locating", place, shown: this.guess(place) } : this.opening(place, this.pin);
-      this.merge = IDLE;
-      this.selected = this.first;
+      this.field(cx, this.look.reading, null);
+      this.look = freshLook(this.first);
       this.first = null;
-      this.folds = new Map();
-      this.more = false;
-      this.due = Date.now();
-      this.diffs = null;
-      this.laid = null;
-      this.listed = null;
-      this.leave();
-      if (this.handed !== null && "target" in this.state && this.handed.key === prKey(this.state.target)) this.reading = this.handed.reading;
-      this.handed = null;
       // The row a window opens on is brought into view once the list has been drawn: before that there is nothing to scroll.
-      cx.timer.after(0, () => this.scroll.scroll_to_item(rowIndex(this.rows(), this.selected)));
+      cx.timer.after(0, () => this.scroll.scroll_to_item(rowIndex(this.rows(), this.look.selected)));
     }
-    // The parts are looked at again when what decides them has moved, here or in another copy of the pane.
+    const lapsed = this.look.merge.step === "armed" && this.offer(Date.now()).look !== "armed";
+    if (lapsed) this.look.merge = IDLE;
     const { aboutOpen, filesOpen } = view();
-    const wanted = `${aboutOpen}:${filesOpen}:${this.detailId()}`;
-    if (wanted !== this.wanted && !moved) this.more = true;
-    this.wanted = wanted;
-    const lapsed = this.merge.step === "armed" && this.offer(Date.now()).look !== "armed";
-    if (lapsed) this.merge = IDLE;
-    this.pump(cx);
+    this.watch.tend(cx, { aboutOpen, filesOpen, check: this.detailCheck() }, this.inFront());
     return moved || lapsed;
   }
 
-  /** @param {State} s */
-  onScreen(s) {
-    // A window covers the panes under it, and asks GitHub itself: they look again when it has closed.
-    if (this.overlay === null && WINDOWS.size > 0) return false;
-    // Opening the pane, or its terminal moving, is asked for, so the first look, until GitHub has answered once, goes ahead even in a hidden window.
-    const first = s.phase === "locating" || (s.phase === "showing" && s.shown?.source !== "live" && s.trouble === null);
-    return (appWindow()?.visible !== false || first) && focused()?.tab === this.tab;
-  }
-
-  /** Runs the one thing there is to do, if nothing is running; whatever it was, it looks again when done. */
-  pump(cx) {
-    const s = this.state;
-    if (checking() || s.phase === "idle" || s.phase === "replay" || s.phase === "bad-pin") return;
-    const shown = this.onScreen(s);
-    if (shown && !this.wasShown && this.due === null) this.due = Date.now();
-    this.wasShown = shown;
-    if (this.busy) return;
-    const job = this.job(s, shown);
-    if (job === null) return;
-    this.busy = true;
-    const gen = this.gen;
-    cx.spawn(async (cx) => {
-      try {
-        await job(cx, gen);
-      } finally {
-        this.busy = false;
-      }
-      this.pump(cx);
-    });
-  }
-
-  /**
-   * What to do now: a merge that was confirmed, else, while the pane is on screen, the poll or lookup that is due,
-   * else whatever is wanted beside the snapshot.
-   * @returns {((cx: any, gen: number) => Promise<void>) | null}
-   */
-  job(s, shown) {
-    if (this.merge.step === "running") return (cx, gen) => this.runMerge(cx, gen);
-    if (!shown) return null;
-    if (this.due !== null && Date.now() >= this.due) {
-      this.due = null;
-      return s.phase === "showing" ? (cx, gen) => this.poll(cx, gen) : (cx, gen) => this.lookup(cx, gen, s.place);
-    }
-    return s.phase === "showing" && this.more ? (cx, gen) => this.parts(cx, gen) : null;
-  }
-
-  /** The showing state an async step may still write to: null once the terminal has moved or the pull request is no longer shown. @returns {Showing | null} */
-  showing(gen) {
-    return gen === this.gen && this.state.phase === "showing" ? this.state : null;
-  }
-
-  async gh(argv, place) {
-    try {
-      const r = await exec("gh", argv, { cwd: place.cwd ?? undefined, on: place.machine, timeout: GH_TIMEOUT_MS });
-      return { ...r, failure: r.code === 0 ? null : classifyFailure(r) };
-    } catch (e) {
-      return { code: -1, stdout: "", stderr: "", failure: classifyRejection(e) };
-    }
-  }
-
-  /** A gh run read with `parse`: `{ value, failure }`. */
-  async ask(argv, place, parse) {
-    return readAnswer(await this.gh(argv, place), parse);
-  }
-
-  async head(place) {
-    if (place.cwd === null) return null;
-    try {
-      const r = await exec("git", ["rev-parse", "HEAD"], { cwd: place.cwd, on: place.machine });
-      return r.code === 0 ? r.stdout.trim() : null;
-    } catch {
-      return null;
-    }
-  }
-
-  async lookup(cx, gen, place) {
-    const found = await this.ask(prLookupArgs(), place, parseLookup);
-    if (gen !== this.gen) return;
-    if (found.failure !== null) {
-      const trouble = troubleAfter(this.state.phase === "failed" ? this.state.trouble : null, found.failure);
-      this.state = found.failure.kind === "no-pr" ? { phase: "no-pr", place } : { phase: "failed", place, trouble };
-      this.due = after(failureDelay(trouble));
-      return cx.notify();
-    }
-    const target = found.value;
-    this.remember(place, target);
-    this.state = this.opening(place, target);
-    cx.notify();
-    await this.poll(cx, gen);
-  }
-
-  async poll(cx, gen) {
-    const was = this.showing(gen);
-    if (was === null) return;
-    const { target, place } = was;
-    const asked = was.shown === null ? [] : stepsWanted(was.shown.snapshot, this.detailId(), STEPS_MAX);
-    const [list, steps, localHead] = await Promise.all([
-      this.ask(prArgs(target), place, (stdout) => {
-        const raw = JSON.parse(stdout);
-        return { snapshot: parsePr(raw), method: mergeMethod(raw.data.repository) };
-      }),
-      asked.length === 0 ? null : this.gh(stepsArgs(asked, target.host), place),
-      this.head(place),
-    ]);
-    const s = this.showing(gen);
-    if (s === null) return;
-    if (list.failure !== null) {
-      if (list.failure.kind === "no-pr" && place.pin === null) {
-        this.state = { phase: "locating", place, shown: null };
-        this.due = Date.now();
-        return cx.notify();
-      }
-      const trouble = troubleAfter(s.trouble, list.failure);
-      this.state = { ...s, localHead, trouble };
-      this.due = after(failureDelay(trouble));
-      return cx.notify();
-    }
-    const snapshot = s.shown === null ? list.value.snapshot : keepSteps(list.value.snapshot, s.shown.snapshot);
-    this.resetAt = snapshot.resetAt ?? this.resetAt;
-    /** @type {Showing} */
-    const landed = { ...s, localHead, method: list.value.method, trouble: null, stepsError: null,
-      shown: { snapshot, about: s.shown?.about ?? null, files: s.shown?.files ?? null, fetchedAt: Date.now(), source: "live" } };
-    this.state = steps === null ? landed : this.withSteps(landed, steps);
-    this.due = after(nextPollDelay(summarize(snapshot).ci.kind, snapshot.pr.state));
-    cx.notify();
-    await this.parts(cx, gen, asked);
-    const done = this.showing(gen);
-    if (done !== null) this.store(done);
-  }
-
-  /**
-   * Reads what the snapshot leaves out, each only when wanted and missing: steps for the selected check and the running ones,
-   * the description while it is open and older than the pull request, and the files while they are open and of another
-   * head commit, with their colours after them. `asked` are the checks whose steps were just asked for.
-   */
-  async parts(cx, gen, asked = []) {
-    this.more = false;
-    const was = this.showing(gen);
-    if (was === null || was.shown === null || was.shown.source !== "live") return;
-    const { target, place } = was;
-    const { snapshot, about, files } = was.shown;
-    const missing = stepsWanted(snapshot, this.detailId(), STEPS_MAX)
-      .filter((id) => !asked.includes(id) && snapshot.checks.find((c) => c.id === id).steps === null);
-    const { aboutOpen, filesOpen } = view();
-    // What people wrote is under the description and among the diff's lines, so either being open wants it.
-    const behind = (aboutOpen || filesOpen) && (this.stale || about?.updatedAt !== snapshot.pr.updatedAt);
-    const moved = filesOpen && files?.head !== snapshot.pr.head;
-    if (missing.length === 0 && !behind && !moved) return;
-    if (behind) this.stale = false;
-    const [steps, read, listed] = await Promise.all([
-      missing.length === 0 ? null : this.gh(stepsArgs(missing, target.host), place),
-      behind ? this.ask(aboutArgs(target), place, (stdout) => parseAbout(JSON.parse(stdout))) : null,
-      moved ? this.ask(filesArgs(target), place, (stdout) => parseFiles(JSON.parse(stdout))) : null,
-    ]);
-    let s = this.showing(gen);
-    if (s === null || s.shown === null) return;
-    if (steps !== null) s = this.withSteps(s, steps);
-    if (read !== null) s = read.failure === null ? { ...s, aboutError: null, shown: { ...s.shown, about: read.value } } : { ...s, aboutError: firstLine(read.failure.text) };
-    if (listed !== null) {
-      s = listed.failure === null ? { ...s, filesError: null, shown: { ...s.shown, files: { head: snapshot.pr.head, list: listed.value } } }
-        : { ...s, filesError: firstLine(listed.failure.text) };
-    }
-    this.state = s;
-    cx.notify();
-    if (listed === null || listed.failure !== null) return;
-    // The files are drawn plain as they land. Their colours follow apart from this job: no poll waits for node.
-    cx.spawn(async (cx) => {
-      const colours = await this.colour(listed.value);
-      const now = this.showing(gen);
-      if (now === null || now.shown?.files?.list !== listed.value) return;
-      this.state = { ...now, shown: { ...now.shown, files: { ...now.shown.files, colours } } };
-      cx.notify();
-    });
-  }
-
-  /**
-   * The files' syntax colours, from the helper in `pierre/`. It runs on this computer wherever gh ran: the diffs are
-   * already here, and it is this computer's node and `npm install` the README asks for. It never rejects: no colours
-   * is an answer, with the reason in its `note`.
-   * @param {File[]} list
-   * @returns {Promise<import("./diff.js").Colours>}
-   */
-  async colour(list) {
-    const folder = `${appHome()}/cache/pr`;
-    const input = `${folder}/highlight-${Date.now()}-${Math.random().toString(36).slice(2)}.json`;
-    const why = (e) => firstLine(classifyRejection(e).text);
-    try {
-      await fs.mkdir(folder, { recursive: true });
-      await fs.writeFile(input, JSON.stringify(helperInput(list)));
-      const colours = await exec("node", [`${appHome()}/mods/pr/pierre/highlight.mjs`, input], { timeout: HELPER_TIMEOUT_MS })
-        .then(coloursOf, (e) => noColours(`No syntax colours: node did not run. ${why(e)}`));
-      await fs.unlink(input);
-      return colours;
-    } catch (e) {
-      return noColours(`No syntax colours: the helper's input could not be written or removed. ${why(e)}`);
-    }
-  }
-
-  /** `s` with the steps of a STEPS_QUERY run set on its checks. gh exits 1 beside a partial answer, so its stdout is read either way. @returns {Showing} */
-  withSteps(s, result) {
-    try {
-      return { ...s, stepsError: null, shown: { ...s.shown, snapshot: mergeSteps(s.shown.snapshot, JSON.parse(result.stdout)) } };
-    } catch (e) {
-      return { ...s, stepsError: firstLine((result.failure ?? classifyRejection(e)).text) };
-    }
-  }
-
-  async readReplay(cx, file) {
-    try {
-      const text = await readTextFile(file);
-      if (text === null) throw new Error(`${file} does not exist`);
-      const frame = JSON.parse(text);
-      this.state = { phase: "replay", file, shown: { snapshot: parsePr(frameAnswer(frame)), about: null, files: null, fetchedAt: Date.parse(frame.at), source: "replay" }, trouble: null };
-    } catch (e) {
-      this.state = { phase: "replay", file, shown: null, trouble: { failure: classifyRejection(e), streak: 1 } };
-    }
-    cx.notify();
-  }
-
-  saved(key, fallback) {
-    try {
-      return JSON.parse(localStorage.getItem(key) ?? "null") ?? fallback;
-    } catch {
-      return fallback;
-    }
-  }
-
-  /** @returns {Shown | null} */
-  cached(target) {
-    const saved = this.saved(cacheKey(target), null);
-    if (saved === null) return null;
-    // A description saved before the pane read GitHub's threads has none: it is read again in place of being shown without them.
-    return { snapshot: saved.snapshot, about: saved.about?.id === undefined ? null : saved.about, files: null, fetchedAt: saved.fetchedAt, source: "cache" };
-  }
-
-  /** Saves what is shown, without steps: they are read again for the checks that want them. */
-  store({ target, shown }) {
-    const key = cacheKey(target);
-    const { snapshot, about, fetchedAt } = shown;
-    save(key, { snapshot: { ...snapshot, checks: snapshot.checks.map((c) => ({ ...c, steps: null })) }, about, fetchedAt });
-    const order = /** @type {string[]} */ (this.saved(CACHE_ORDER, []));
-    if (order.at(-1) === key) return;
-    const kept = [...order.filter((k) => k !== key), key];
-    for (const old of kept.slice(0, -CACHE_KEPT)) localStorage.removeItem(old);
-    save(CACHE_ORDER, kept.slice(-CACHE_KEPT));
-  }
-
-  /** @returns {Shown | null} */
-  guess(place) {
-    const target = this.saved(PLACES, {})[placeKey(place)];
-    return target === undefined ? null : this.cached(target);
-  }
-
-  remember(place, target) {
-    const { [placeKey(place)]: _, ...rest } = this.saved(PLACES, {});
-    save(PLACES, Object.fromEntries([...Object.entries(rest).slice(-(PLACES_KEPT - 1)), [placeKey(place), target]]));
-  }
-
-  /** What is drawn of a pull request, in whichever phase has one. @returns {Shown | null} */
-  shown() {
-    return "shown" in this.state ? this.state.shown : null;
-  }
-
-  snapshot() {
-    return this.shown()?.snapshot ?? null;
-  }
-
-  /** The files read for the pull request shown: not null while one's diff is drawn. */
-  files() {
-    return this.shown()?.files ?? null;
-  }
-
-  rows() {
-    const shown = this.shown();
-    if (shown === null) return [];
-    return paneRows(shown.snapshot, { folds: this.folds, ...view(), files: shown.files?.list ?? null });
-  }
-
-  /** The file whose diff is drawn. @returns {File | null} */
-  detailFile() {
-    const row = detailOf(this.rows(), this.selected, this.wide, this.expanded);
-    return row?.kind === "file" ? row.file : null;
-  }
-
-  /** The check whose steps are drawn. */
-  detailId() {
-    const row = detailOf(this.rows(), this.selected, this.wide, this.expanded);
-    return row?.kind === "check" ? row.check.id : null;
-  }
-
-  /** The diff of the file at `path`, ready to draw; null when the file is not among them or has no diff. */
-  diffAt(path) {
-    const files = this.files();
-    if (this.diffs?.files !== files) this.diffs = { files, byPath: new Map() };
-    if (!this.diffs.byPath.has(path)) {
-      const patch = files.list.find((file) => file.path === path)?.patch ?? null;
-      const lines = files.colours?.byPath.get(path);
-      const diff = patch === null ? null : diffOf(patch, Array.isArray(lines) ? lines : null);
-      this.diffs.byPath.set(path, diff === null ? null : { ...diff, why: plainNote(files.colours, path, diff.coloured) });
-    }
-    return this.diffs.byPath.get(path);
-  }
-
-  /** A file's diff ready to draw. `patch` is not null. */
-  diff(file) {
-    return this.diffAt(file.path);
-  }
-
-  select(key) {
-    // One scroll position serves whichever file's diff is drawn, so another file starts at its top.
-    if (key !== this.selected) this.lines.scroll_to_item(0);
-    this.selected = key;
-  }
-
-  clickRow(cx, row) {
-    this.leave();
-    if (row.kind === "group") this.folds.set(row.group.key, !row.open);
-    if (row.kind === "about") setShared(VIEW, { ...view(), aboutOpen: !row.open });
-    if (row.kind === "files") setShared(VIEW, { ...view(), filesOpen: !row.open });
-    if (row.kind === "hidden" || row.kind === "more-files") cx.open_url(rowUrl(row, this.snapshot()));
-    if (row.kind === "check" || row.kind === "file") this.expanded = row.key === selectedRow(this.rows(), this.selected)?.key ? !this.expanded : true;
-    this.select(row.key);
-    cx.notify();
+  /** A command from outside the pane: `herdr-app do pr.<command>`, or a key bound to one. */
+  command(action, cx) {
+    if (this.reader() !== null && READ_COMMANDS.has(action)) this.read(action, cx, true);
+    else if (COMMANDS.has(action)) this.act(action, cx);
   }
 
   key(e, cx) {
-    if (this.draft !== null) {
-      // While the field is open the keys are its own: Esc gives up what is typed, and Enter saves it. Enter in the field
-      // is the field's to report, so it is taken here only when the keyboard has left it.
-      if (e.key === "escape") this.drop();
-      else if (e.key === "enter" && !this.typing) this.submit(cx);
+    if (typing(this.look.reading)) {
+      // Enter in the field is the field's to report (its `submit`), so it is taken here only when the keyboard has left it.
+      if (e.key === "escape") this.read("escape", cx);
+      else if (e.key === "enter" && !this.fieldFocused) this.read("confirm", cx);
       else return;
-      cx.notify();
     } else if (this.reader() !== null) {
-      const action = REVIEW_KEYS[e.keystroke];
-      // A held key moves the cursor; it starts and sends nothing.
+      const action = READ_KEYS[e.keystroke];
       if (action === undefined || (e.is_held === true && !isMove(action))) return;
-      this.readAct(action, cx);
+      this.read(action, cx);
     } else if (e.keystroke === "m") {
       this.pressMerge(cx, e.is_held === true);
     } else {
@@ -612,31 +187,114 @@ export default class PullRequest extends View {
     cx.stop_propagation();
   }
 
+  modifiers(e) {
+    this.shift = e.modifiers.shift;
+  }
+
+  state() {
+    return this.watch.state;
+  }
+
+  scene() {
+    return sceneOf(this.watch.state);
+  }
+
+  /** The pull request shown, while a diff of it is read. @returns {Showing} */
+  showing() {
+    const s = this.watch.state;
+    if (s.phase !== "showing" || s.shown === null) throw new Error("no pull request is shown");
+    return s;
+  }
+
+  snapshot() {
+    return this.scene()?.shown.snapshot ?? null;
+  }
+
+  /** The files read for the pull request shown: not null while one's diff is drawn. */
+  files() {
+    return this.scene()?.shown.files ?? null;
+  }
+
+  rows() {
+    const shown = this.scene()?.shown ?? null;
+    if (shown === null) return [];
+    return paneRows(shown.snapshot, { folds: this.look.folds, ...view(), files: shown.files?.list ?? null });
+  }
+
+  /** The selected file or check whose diff or steps are drawn. */
+  detail() {
+    return detailOf(this.rows(), this.look.selected, this.wide, this.look.expanded);
+  }
+
+  /** The file whose diff is drawn. @returns {File | null} */
+  detailFile() {
+    const row = this.detail();
+    return row?.kind === "file" ? row.file : null;
+  }
+
+  /** The check whose steps are drawn. */
+  detailCheck() {
+    const row = this.detail();
+    return row?.kind === "check" ? row.check.id : null;
+  }
+
+  /** The diff of the file at `path`, ready to draw; null when the file is not among them or has no diff. */
+  diffAt(path) {
+    const files = this.files();
+    const { look } = this;
+    if (look.diffs?.files !== files) look.diffs = { files, byPath: new Map() };
+    if (!look.diffs.byPath.has(path)) {
+      const patch = files.list.find((file) => file.path === path)?.patch ?? null;
+      look.diffs.byPath.set(path, patch === null ? null : colouredDiff(patch, files.colours, path));
+    }
+    return look.diffs.byPath.get(path);
+  }
+
+  /** A file's diff rows by its path, as they are numbered in annotations and threads; none for a file without a diff. */
+  patched(path) {
+    return this.diffAt(path)?.rows ?? [];
+  }
+
+  select(key) {
+    if (key !== this.look.selected) this.lines.scroll_to_item(0);
+    this.look.selected = key;
+  }
+
+  clickRow(cx, row) {
+    const { look } = this;
+    this.leave(cx);
+    if (row.kind === "group") look.folds.set(row.group.key, !row.open);
+    if (row.kind === "about") setShared(VIEW, { ...view(), aboutOpen: !row.open });
+    if (row.kind === "files") setShared(VIEW, { ...view(), filesOpen: !row.open });
+    if (row.kind === "hidden" || row.kind === "more-files") cx.open_url(rowUrl(row, this.snapshot()));
+    if (row.kind === "check" || row.kind === "file") look.expanded = row.key === selectedRow(this.rows(), look.selected)?.key ? !look.expanded : true;
+    this.select(row.key);
+    cx.notify();
+  }
+
   /** An action while the keyboard is in the list. Any of them takes back Merge's first press, and Esc then does no more. */
   act(action, cx) {
     if (this.disarm(cx) && action === "escape") return;
+    const { look } = this;
     const rows = this.rows();
-    const row = selectedRow(rows, this.selected);
+    const row = selectedRow(rows, look.selected);
     if (action === "down" || action === "up") {
-      this.select(moveSelection(rows, this.selected, action === "down" ? 1 : -1));
-      // Each row is one child of the list, so its place in `rows` is the child to reveal.
-      this.scroll.scroll_to_item(rowIndex(rows, this.selected));
+      this.select(moveSelection(rows, look.selected, action === "down" ? 1 : -1));
+      this.scroll.scroll_to_item(rowIndex(rows, look.selected));
     } else if ((action === "toggle" || action === "read") && row?.kind === "file" && row.file.patch !== null) {
-      // A diff is opened to be read: the keyboard goes into it.
-      this.expanded = true;
-      this.reading = { path: row.file.path, cursor: 0, anchor: null };
+      look.expanded = true;
+      look.reading = startReading(row.file.path);
       this.lines.scroll_to_item(0);
     } else if (action === "toggle" && row !== null) {
-      if (row.kind === "check" || row.kind === "file") this.expanded = !this.expanded;
+      if (row.kind === "check" || row.kind === "file") look.expanded = !look.expanded;
       else this.clickRow(cx, row);
     } else if (action === "open" && row !== null) {
       cx.open_url(rowUrl(row, this.snapshot()));
     } else if (action === "refresh") {
-      this.refresh(cx);
+      this.watch.refresh(cx);
     } else if (action === "escape") {
-      // Esc leaves what a narrow pane shows in place of its list. With nothing to leave, a window closes.
-      if (this.overlay !== null && (this.wide || !this.expanded)) this.closePane();
-      else this.expanded = false;
+      if (this.overlay !== null && (this.wide || !look.expanded)) this.closePane();
+      else look.expanded = false;
     } else if (action === "window") {
       this.popOut();
     } else if (action === "close") {
@@ -645,49 +303,104 @@ export default class PullRequest extends View {
     cx.notify();
   }
 
-  /** The keyboard's place in the diff, while the file it is in is still the one drawn. */
+  /** The keyboard's place in the diff, while the file it is in is still the one drawn. @returns {Reading | null} */
   reader() {
-    return this.reading !== null && this.detailFile()?.path === this.reading.path ? this.reading : null;
+    const { reading } = this.look;
+    return reading !== null && this.detailFile()?.path === reading.path ? reading : null;
   }
 
   /** Gives the keyboard back to the list, and gives up what is half done in the diff. */
-  leave() {
-    this.reading = null;
-    this.confirming = null;
-    this.notice = null;
-    this.activeId = null;
-    this.drop();
+  leave(cx) {
+    const { look } = this;
+    this.field(cx, look.reading, null);
+    look.reading = null;
+    look.notice = null;
   }
 
-  /** GitHub's threads on the pull request shown; none until what people wrote there has been read. @returns {import("./github.js").Thread[]} */
+  /** Opens the field when a reading comes to have something to type, and closes it when it no longer has. @param {Reading | null} before @param {Reading | null} after */
+  field(cx, before, after) {
+    if (typing(after) && after.mode !== before?.mode) {
+      this.input.set_value(after.mode.body);
+      // The field is drawn by the draw this asks for, and takes the keyboard only once it is.
+      cx.timer.after(0, () => this.input.focus());
+    } else if (typing(before) && !typing(after)) {
+      this.input.set_value("");
+      this.handle.focus();
+    }
+  }
+
+  /** An action while the keyboard is in a diff. `command` is whether it came from outside the pane. */
+  read(action, cx, command = false) {
+    const { look } = this;
+    const before = look.reading;
+    if (before === null) return;
+    // The pull request can go while a diff of it is read: the keyboard then goes back to the list.
+    if (this.files() === null) {
+      this.leave(cx);
+      return void cx.notify();
+    }
+    const review = this.notes();
+    const step = readStep(before, action, {
+      rowsOf: (path) => this.patched(path), head: this.files().head, review, threads: this.threads(), paths: this.paths(),
+      readable: this.rows().filter((r) => r.kind === "file" && r.file.patch !== null).map((r) => r.file.path),
+      page: Math.floor(this.lines.viewport_size().height / lineHeight() / 2), agent: this.agent(), blocked: (event) => this.postBlocked(event),
+      sending: this.sending(), typed: this.input.value(), command,
+    });
+    look.reading = step.reading;
+    this.field(cx, before, step.reading);
+    if (step.notice !== undefined) look.notice = step.notice;
+    if (step.review !== review) this.keep(step.review);
+    if (step.reading === null) {
+      if (!this.wide) look.expanded = false;
+    } else if (step.reading.path !== before.path) {
+      this.openDiff(step.reading);
+    } else if (step.reveal) {
+      this.reveal();
+    }
+    for (const effect of step.effects) this.perform(cx, effect);
+    if (!typing(before) && action === "window") this.popOut();
+    if (!typing(before) && action === "close") this.closePane();
+    cx.notify();
+  }
+
+  /** Draws another file's diff, with the keyboard's place in it near the top. @param {Reading} reading */
+  openDiff(reading) {
+    const row = this.rows().find((r) => r.kind === "file" && r.file.path === reading.path);
+    this.select(row.key);
+    const line = this.listing(row.file).at[reading.cursor];
+    this.lines.scroll_to_item(Math.max(0, Math.min(line, this.notedItem(row.file) ?? line) - 3));
+  }
+
+  /**
+   * A click in the diff: on a line it moves the cursor, on an annotation or a thread it makes that the one the keys
+   * act on. `key` is the row's place in the list.
+   */
+  clickLine(cx, file, key) {
+    const item = this.listing(file).items[Number(key)];
+    if (item === undefined) return;
+    const { look } = this;
+    const before = look.reading;
+    look.reading = readClick(this.reader(), file.path, item, this.shift);
+    this.field(cx, before, look.reading);
+    look.notice = null;
+    look.expanded = true;
+    cx.notify();
+  }
+
+  /** GitHub's threads on the pull request shown; none until what people wrote there has been read. @returns {Thread[]} */
   threads() {
-    return (this.state.phase === "showing" ? this.state.shown?.about?.threads : null) ?? NO_THREADS;
+    return this.scene()?.shown.about?.threads ?? [];
   }
 
-  /** A file's diff rows by its path, as they are numbered in annotations and threads; none for a file without a diff. */
-  patched(path) {
-    return this.diffAt(path)?.rows ?? [];
+  /** The files' paths in GitHub's order, which the annotations are sorted by. */
+  paths() {
+    return (this.files()?.list ?? []).map((file) => file.path);
   }
 
   /** What `r`, `x`, `z` and `f` act on at the cursor in the diff drawn: an annotation, or one of GitHub's threads. */
   active() {
-    const { path } = this.detailFile();
-    return activeNote(this.notes().annotations, this.threads(), this.activeId, path, this.files().head, this.patched(path), this.reader()?.cursor ?? -1);
-  }
-
-  /** Has what people wrote on GitHub read again, now: the pane has just written there itself. */
-  reread(cx) {
-    this.stale = true;
-    this.more = true;
-    this.pump(cx);
-  }
-
-  /** Gives up the annotation being typed. */
-  drop() {
-    if (this.draft === null) return;
-    this.draft = null;
-    this.input.set_value("");
-    this.handle.focus();
+    const { path, activeId, cursor } = this.reader();
+    return activeNote(this.notes().annotations, this.threads(), activeId, path, this.files().head, this.patched(path), cursor);
   }
 
   /**
@@ -707,7 +420,8 @@ export default class PullRequest extends View {
 
   /** The name the annotations on the pull request shown are saved under; null while none is shown. */
   reviewKey() {
-    return this.state.phase === "showing" ? prKey(this.state.target) : null;
+    const { target } = this.scene() ?? { target: null };
+    return target === null ? null : prKey(target);
   }
 
   /** The review saved under `key`: that of the pull request a send was for, which the pane may have left since. */
@@ -721,22 +435,22 @@ export default class PullRequest extends View {
 
   /** A file's diff with the annotations and threads among its lines, and each row's height at the width it is drawn at. */
   listing(file) {
-    const { rows, digits } = this.diff(file);
+    const { look } = this;
+    const { rows, digits } = this.diffAt(file.path);
     const { annotations } = this.notes();
-    const threads = this.threads();
-    if (this.laid?.rows !== rows || this.laid.annotations !== annotations || this.laid.threads !== threads) {
-      this.laid = { rows, annotations, threads, ...annotatedRows(rows, annotations, file.path, this.files().head, threads) };
+    const about = this.scene().shown.about;
+    if (look.laid?.rows !== rows || look.laid.annotations !== annotations || look.laid.about !== about) {
+      look.laid = { rows, annotations, about, ...annotatedRows(rows, annotations, file.path, this.files().head, about?.threads ?? []) };
     }
-    const { laid } = this;
+    const { laid } = look;
     const columns = wrapColumns(this.diffWidth, digits), height = lineHeight();
-    if (this.listed?.laid !== laid || this.listed.columns !== columns || this.listed.height !== height) {
-      // A row is as high as the lines its text folds into at this width; `tops` is where each starts.
+    if (look.listed?.laid !== laid || look.listed.columns !== columns || look.listed.height !== height) {
       const sizes = laid.items.map((item) => (item.type === "line" ? rowLines(item.row, columns) : 1) * height);
       let end = 0;
       const tops = sizes.map((size) => (end += size) - size);
-      this.listed = { laid, items: laid.items, at: laid.at, columns, height, sizes, tops };
+      look.listed = { laid, items: laid.items, at: laid.at, columns, height, sizes, tops };
     }
-    return this.listed;
+    return look.listed;
   }
 
   /** The diff's width as it is drawn, which its lines fold at. The cursor's line is kept on screen as they fold anew. */
@@ -744,17 +458,16 @@ export default class PullRequest extends View {
     const width = Math.round(unzoomed(size.width)), height = Math.round(unzoomed(size.height));
     if (width === this.diffWidth && height === this.diffHeight) return;
     this.diffWidth = width;
-    // The bar under the diff grows with what it shows, and takes its room from the diff.
     this.diffHeight = height;
-    const file = this.detailFile();
-    if (file !== null && this.reader() !== null) this.reveal(file);
+    if (this.reader() !== null) this.reveal();
     cx.notify();
   }
 
   /** Brings the cursor's row on screen when part of it is off it, and with it the annotation or thread stepped to or clicked. */
-  reveal(file) {
+  reveal() {
+    const file = this.detailFile();
     const { at, tops, sizes } = this.listing(file);
-    const line = at[this.reading.cursor], noted = this.notedItem(file) ?? line;
+    const line = at[this.look.reading.cursor], noted = this.notedItem(file) ?? line;
     const from = tops[Math.min(line, noted)], to = tops[Math.max(line, noted)] + sizes[Math.max(line, noted)];
     const top = this.lines.offset().y;
     if (from < top || to > top + this.lines.viewport_size().height) this.lines.scroll_to_item(noted, "center");
@@ -762,14 +475,15 @@ export default class PullRequest extends View {
 
   /** Where in a file's listing the annotation or thread stepped to or clicked stands; null when none is, or it is not in this file. */
   notedItem(file) {
-    if (this.activeId === null) return null;
-    const found = this.listing(file).items.findIndex((item) => item.type !== "line" && (item.type === "thread" ? item.thread.id : item.annotation.id) === this.activeId);
+    const id = this.look.reading?.activeId ?? null;
+    if (id === null) return null;
+    const found = this.listing(file).items.findIndex((item) => item.type !== "line" && itemId(item) === id);
     return found < 0 ? null : found;
   }
 
-  /** The pull request as the agent is told of it, while a diff of it is read. @returns {import("./review.js").Subject} */
+  /** The pull request as the agent is told of it, while a diff of it is read. @returns {import("./send.js").Subject} */
   subject() {
-    const { target, shown } = /** @type {Showing} */ (this.state);
+    const { target, shown } = this.showing();
     return { ref: prRef(target), title: shown.snapshot.pr.title, url: shown.snapshot.pr.url, head: shown.files.head };
   }
 
@@ -778,129 +492,57 @@ export default class PullRequest extends View {
     return agentOf(panes().filter((p) => p.tab === this.tab), this.follow, this.machine());
   }
 
+  /** Why the review cannot be posted on GitHub right now, or null. */
+  postBlocked(event) {
+    const { shown, trouble } = this.showing();
+    return postBlock({ event, count: toSend(this.notes().annotations).length, live: liveShown(shown, trouble), busy: this.sending().has("post"),
+      mine: shown.about?.mine ?? null, state: shown.snapshot.pr.state });
+  }
+
+  /** Runs what a step in the diff asked to have leave the pane. @param {import("./reading.js").Effect} effect */
+  perform(cx, effect) {
+    const { host } = this.showing().target;
+    if (effect.do === "ask") this.askAgent(cx, effect.question);
+    else if (effect.do === "send") this.sendReview(cx);
+    else if (effect.do === "post") this.post(cx, effect.event);
+    else if (effect.do === "forward") this.forward(cx, effect.thread);
+    else if (effect.do === "resolve") this.write(cx, effect.thread, resolveArgs(host, effect.thread.id, effect.to), effect.to ? "Resolved on GitHub." : "Open again on GitHub.");
+    else if (effect.do === "reply") this.write(cx, effect.thread, replyArgs(host, effect.thread.id, effect.body), "Replied on GitHub.", effect.body);
+  }
+
+  /** What is on its way out of the pane from the pull request shown. */
+  sending() {
+    return this.going.get(this.reviewKey()) ?? NOTHING;
+  }
+
+  /**
+   * Runs what leaves the pane, with `tag` among the `sending` of the pull request it leaves from while it is on its way.
+   * `then` is told how it went, by which time the pane may show another pull request: what it needs of this one is read
+   * before the call.
+   * @template T @param {() => Promise<T>} go @param {(result: T, cx: any) => void} then
+   */
+  out(cx, tag, go, then) {
+    const key = this.reviewKey();
+    const sending = this.going.get(key) ?? new Set();
+    this.going.set(key, sending.add(tag));
+    cx.spawn(async (cx) => {
+      const result = await go().finally(() => sending.delete(tag));
+      then(result, cx);
+      cx.notify();
+    });
+  }
+
   /** Types `text` into the agent's terminal and submits it. @returns {Promise<"sent" | { failed: string }>} */
   async send(text, to = this.agent()) {
     if (to.terminal === null) return { failed: to.why };
     try {
       return sendResult(await hc(["send", to.terminal, text]));
     } catch (e) {
-      return { failed: firstLine(classifyRejection(e).text) };
+      return { failed: firstLine(errorText(e)) };
     }
   }
 
-  /** What a key does while the keyboard is in a diff. */
-  readAct(action, cx) {
-    const file = this.detailFile();
-    const at = this.reading;
-    const { rows } = this.diff(file);
-    const { head } = this.files();
-    const review = this.notes();
-    const asked = this.confirming;
-    this.confirming = null;
-    this.notice = null;
-    // The diff under the cursor may have got shorter: the pull request can move while it is read.
-    at.cursor = Math.min(at.cursor, rows.length - 1);
-    at.anchor = at.anchor === null ? null : Math.min(at.anchor, rows.length - 1);
-    if (isMove(action)) {
-      at.cursor = moveCursor(action, at.cursor, rows.length, Math.floor(this.lines.viewport_size().height / lineHeight() / 2));
-      this.activeId = null;
-      this.reveal(file);
-    } else if (action === "range") {
-      at.anchor = at.anchor === null ? at.cursor : null;
-    } else if (action in KINDS) {
-      const { start, end } = stretch(at.cursor, at.anchor);
-      this.type(cx, { kind: action, target: targetOf(file.path, head, rows, start, end), editingId: null }, "");
-    } else if (action === "overall") {
-      this.type(cx, { kind: "comment", target: null, editingId: null }, "");
-    } else if (action === "next" || action === "previous") {
-      this.step(action === "next" ? 1 : -1);
-    } else if (action === "edit" || action === "delete") {
-      // `r` changes an annotation of one's own, and answers one of GitHub's threads.
-      const { annotation: one, thread } = this.active();
-      if (thread !== null && action === "edit") this.answer(cx, thread);
-      else if (thread !== null) this.notice = "x deletes an annotation of yours; z resolves a thread.";
-      else if (one === null) this.notice = "No annotation or thread on this line.";
-      else if (action === "edit") this.type(cx, { kind: one.kind, target: one.target, editingId: one.id }, one.body);
-      else {
-        this.keep(dropAnnotation(review, one.id));
-        this.activeId = null;
-      }
-    } else if (action === "resolve" || action === "forward") {
-      const { thread } = this.active();
-      if (thread === null) this.notice = "No thread on this line.";
-      else if (action === "resolve") this.resolve(cx, thread);
-      else this.propose({ what: "forward", thread: thread.id });
-    } else if (action === "finish") {
-      this.propose({ what: "send" });
-    } else if (action === "post" || action === "approve") {
-      this.propose({ what: "post", event: action === "post" ? "COMMENT" : "APPROVE" });
-    } else if (action === "confirm") {
-      if (this.draft !== null) this.submit(cx);
-      else if (asked?.what === "send") this.sendReview(cx);
-      else if (asked?.what === "forward") this.forward(cx, asked.thread);
-      else if (asked?.what === "post") this.post(cx, asked.event);
-    } else if (action === "next-file" || action === "previous-file") {
-      this.turn(action === "next-file" ? 1 : -1);
-    } else if (action === "escape") {
-      // One thing at a time is given up: the field, the question before sending, the range, then the diff.
-      if (this.draft !== null) this.drop();
-      else if (asked === null && at.anchor !== null) at.anchor = null;
-      else if (asked === null) {
-        this.leave();
-        if (!this.wide) this.expanded = false;
-      }
-    } else if (action === "window") {
-      this.popOut();
-    } else if (action === "close") {
-      this.closePane();
-    }
-    cx.notify();
-  }
-
-  /** Opens the field on a draft. */
-  type(cx, draft, body) {
-    this.draft = draft;
-    this.input.set_value(body);
-    cx.notify();
-    // The field is drawn by the draw this asks for, and takes the keyboard only once it is.
-    cx.timer.after(0, () => this.input.focus());
-  }
-
-  /** Enter in the field: the draft is saved, and a question goes to the agent at once; a reply goes to GitHub at once. */
-  submit(cx) {
-    if (this.draft === null) return;
-    if ("reply" in this.draft) {
-      const { reply } = this.draft, body = this.input.value().trim();
-      this.drop();
-      if (body !== "") this.write(cx, reply, replyArgs(/** @type {Showing} */ (this.state).target.host, reply.id, body), "Replied on GitHub.", body);
-      return void cx.notify();
-    }
-    const { review, saved } = saveDraft(this.notes(), this.draft, this.input.value());
-    this.drop();
-    if (saved !== null) {
-      this.keep(review);
-      this.activeId = saved.id;
-      if (this.reading !== null) this.reading.anchor = null;
-      if (saved.kind === "question") this.askAgent(cx, saved);
-    }
-    cx.notify();
-  }
-
-  /**
-   * Runs what leaves the pane, with `tag` among `sending` while it is on its way. `then` is told how it went, by which
-   * time the pane may show another pull request: what it needs of this one is read before the call.
-   * @template T @param {() => Promise<T>} run @param {(result: T, cx: any) => void} then
-   */
-  out(cx, tag, run, then) {
-    this.sending.add(tag);
-    cx.spawn(async (cx) => {
-      const result = await run();
-      this.sending.delete(tag);
-      then(result, cx);
-      cx.notify();
-    });
-  }
-
+  /** A question goes to the agent as it is saved. */
   askAgent(cx, question) {
     const key = this.reviewKey();
     const text = formatQuestion(this.subject(), question);
@@ -921,25 +563,6 @@ export default class PullRequest extends View {
     return { annotations, count: toSend(annotations).length, sent };
   }
 
-  /** Why the review cannot be posted on GitHub right now, or null. */
-  postBlocked(event) {
-    const { shown, trouble } = /** @type {Showing} */ (this.state);
-    return postBlock({ event, count: toSend(this.notes().annotations).length, live: liveShown(shown, trouble), busy: this.sending.has("post"),
-      mine: shown.about?.mine ?? null, state: shown.snapshot.pr.state });
-  }
-
-  /** `y`, `Y`, `A` and `f`: Enter is asked to send what they name, or the line under the diff says why it cannot go. */
-  propose(asking) {
-    const { annotations } = this.notes();
-    const to = this.agent();
-    if (asking.what === "post") this.notice = this.postBlocked(asking.event);
-    else if (asking.what === "send" && toSend(annotations).length === 0) {
-      this.notice = annotations.length === 0 ? "Nothing to send yet: c, s or i notes the line." : "Nothing to send: the questions went as they were asked.";
-    } else if (to.terminal === null) this.notice = to.why;
-    else if (this.sending.has(asking.what)) this.notice = "It is on its way.";
-    if (this.notice === null) this.confirming = asking;
-  }
-
   /** `y`, then Enter: the review goes to the agent, and what was sent leaves the pane. */
   sendReview(cx) {
     const { annotations, count, sent } = this.leaving();
@@ -947,42 +570,24 @@ export default class PullRequest extends View {
     const text = formatReview(this.subject(), annotations, this.paths());
     this.out(cx, "send", () => this.send(text, to), (went) => {
       if (went === "sent") sent();
-      this.notice = went === "sent" ? `Sent ${plural(count, "annotation")} to ${to.name}.` : `Not sent, and kept here: ${went.failed}`;
+      this.look.notice = went === "sent" ? `Sent ${plural(count, "annotation")} to ${to.name}.` : `Not sent, and kept here: ${went.failed}`;
     });
   }
 
   /**
    * `Y` or `A`, then Enter: the annotations go to GitHub as one review, a comment each on its lines, and leave the pane.
-   * Whether it may go is asked again here: Enter can come long after the key.
    * @param {"COMMENT" | "APPROVE"} event
    */
   post(cx, event) {
-    const blocked = this.postBlocked(event);
-    if (blocked !== null) return void (this.notice = blocked);
-    const { target, place, shown } = /** @type {Showing} */ (this.state);
+    const { target, place, shown } = this.showing();
     const { annotations, count, sent } = this.leaving();
     const posting = postingOf(annotations, this.paths(), shown.files.head, (path) => this.patched(path), event);
-    this.out(cx, "post", () => this.gh(reviewArgs(target.host, shown.about.id, posting), place), ({ failure }, cx) => {
-      if (failure !== null) return void (this.notice = `Not posted, and kept here: ${oneLine(failure.text)}`);
+    this.out(cx, "post", () => gh(reviewArgs(target.host, shown.about.id, posting), place), ({ failure }, cx) => {
+      if (failure !== null) return void (this.look.notice = `Not posted, and kept here: ${oneLine(failure.text)}`);
       sent();
-      this.notice = event === "APPROVE" ? `Approved on GitHub${count === 0 ? "" : `, with ${plural(count, "annotation")}`}.` : `Posted ${plural(count, "annotation")} on GitHub.`;
-      this.reread(cx);
+      this.look.notice = event === "APPROVE" ? `Approved on GitHub${count === 0 ? "" : `, with ${plural(count, "annotation")}`}.` : `Posted ${plural(count, "annotation")} on GitHub.`;
+      this.watch.reread(cx);
     });
-  }
-
-  /** `r` on one of GitHub's threads: the field opens on a reply to it. `failed` is why the last try did not go. */
-  answer(cx, thread, body = "", failed = null) {
-    if (!thread.canReply) this.notice = "GitHub does not let you reply to this thread.";
-    else if (this.sending.has(thread.id)) this.notice = "Still writing to this thread.";
-    else this.type(cx, { reply: thread, failed }, body);
-  }
-
-  /** `z`: resolves one of GitHub's threads, or opens a resolved one again. */
-  resolve(cx, thread) {
-    const to = !thread.resolved;
-    if (to ? !thread.canResolve : !thread.canUnresolve) this.notice = `GitHub does not let you ${to ? "resolve" : "open"} this thread.`;
-    else if (this.sending.has(thread.id)) this.notice = "Still writing to this thread.";
-    else this.write(cx, thread, resolveArgs(/** @type {Showing} */ (this.state).target.host, thread.id, to), to ? "Resolved on GitHub." : "Open again on GitHub.");
   }
 
   /**
@@ -990,93 +595,30 @@ export default class PullRequest extends View {
    * field where the thread is still at hand, and said in the line under the diff where it is not.
    */
   write(cx, thread, argv, done, reply = null) {
-    const { place } = /** @type {Showing} */ (this.state);
-    const gen = this.gen;
-    this.out(cx, thread.id, () => this.gh(argv, place), ({ failure }, cx) => {
+    const { place } = this.showing();
+    const from = this.look;
+    this.out(cx, thread.id, () => gh(argv, place), ({ failure }, cx) => {
+      const { look } = this;
+      const before = look === from ? this.reader() : null;
       if (failure === null) {
-        this.notice = done;
-        this.reread(cx);
-      } else if (reply !== null && gen === this.gen && this.draft === null && this.reader() !== null) {
-        this.answer(cx, thread, reply, oneLine(failure.text));
+        look.notice = done;
+        this.watch.reread(cx);
+      } else if (reply !== null && before !== null && !typing(before)) {
+        look.reading = retryReply(before, thread, reply, oneLine(failure.text));
+        this.field(cx, before, look.reading);
       } else {
-        this.notice = `GitHub did not take it: ${oneLine(failure.text)}${reply === null ? "" : ` Your words: ${reply}`}`;
+        look.notice = `GitHub did not take it: ${oneLine(failure.text)}${reply === null ? "" : ` Your words: ${reply}`}`;
       }
     });
   }
 
   /** `f`, then Enter: one of GitHub's threads goes to the tab's agent, with the lines it is on. */
-  forward(cx, id) {
-    const thread = this.threads().find((one) => one.id === id);
+  forward(cx, thread) {
     const to = this.agent();
-    if (thread === undefined) return void (this.notice = "That thread is no longer on GitHub.");
     const text = formatThread(this.subject(), thread, this.patched(thread.path));
     this.out(cx, "forward", () => this.send(text, to), (went) => {
-      this.notice = went === "sent" ? `Sent the thread to ${to.name}.` : `Not sent: ${went.failed}`;
+      this.look.notice = went === "sent" ? `Sent the thread to ${to.name}.` : `Not sent: ${went.failed}`;
     });
-  }
-
-  /** The files' paths in GitHub's order, which the annotations are sorted by. */
-  paths() {
-    return (this.files()?.list ?? []).map((file) => file.path);
-  }
-
-  /** Puts the keyboard in another file's diff, at `cursor`, when that file is in the list. */
-  openDiff(path, cursor) {
-    const row = this.rows().find((r) => r.kind === "file" && r.file.path === path && r.file.patch !== null);
-    if (row === undefined) return false;
-    // Selecting another file starts its diff at the top; the cursor is then brought on screen.
-    this.select(row.key);
-    this.reading = { path, cursor, anchor: null };
-    const line = this.listing(row.file).at[cursor];
-    this.lines.scroll_to_item(Math.max(0, Math.min(line, this.notedItem(row.file) ?? line) - 3));
-    return true;
-  }
-
-  /** `h` and `l`: the annotation or thread before or after the active one, in whichever file it is. */
-  step(delta) {
-    const { head } = this.files();
-    const ordered = stops(this.notes().annotations, this.threads(), this.paths(), head, (path) => this.patched(path));
-    if (ordered.length === 0) return void (this.notice = "No annotations or threads yet.");
-    const { id, path, row } = stepAnnotation(ordered, this.activeId, delta);
-    this.activeId = id;
-    if (path === null) return;
-    if (path !== this.reading.path) {
-      if (!this.openDiff(path, row)) this.notice = `${path} has no diff here to show it in.`;
-      return;
-    }
-    this.reading.cursor = Math.min(row, this.diff(this.detailFile()).rows.length - 1);
-    this.reading.anchor = null;
-    this.reveal(this.detailFile());
-  }
-
-  /** `n` and `p`: the next or previous file that has a diff. */
-  turn(delta) {
-    const files = this.rows().filter((r) => r.kind === "file" && r.file.patch !== null);
-    const next = files[files.findIndex((r) => r.file.path === this.reading.path) + delta];
-    if (next === undefined) this.notice = delta > 0 ? "This is the last file." : "This is the first file.";
-    else this.openDiff(next.file.path, 0);
-    this.activeId = null;
-  }
-
-  /**
-   * A click in the diff. On a line it puts the cursor there, and with Shift held makes it the end of a range from where
-   * the cursor was; on an annotation or a thread it makes that the one the keys act on. `key` is the row's place in the list.
-   */
-  clickLine(cx, file, key) {
-    const item = this.listing(file).items[Number(key)];
-    if (item === undefined) return;
-    const was = this.reader();
-    this.confirming = null;
-    this.notice = null;
-    this.expanded = true;
-    if (item.type !== "line") {
-      this.reading = was ?? { path: file.path, cursor: 0, anchor: null };
-      this.activeId = item.type === "thread" ? item.thread.id : item.annotation.id;
-    } else {
-      this.reading = { path: file.path, cursor: item.index, anchor: this.shift && was !== null ? was.anchor ?? was.cursor : null };
-      this.activeId = null;
-    }
-    cx.notify();
   }
 
   /**
@@ -1097,8 +639,9 @@ export default class PullRequest extends View {
 
   /** Takes back Merge's first press, or the line on how a merge went. Says whether there was one. */
   disarm(cx) {
-    if (this.merge.step !== "armed" && this.merge.step !== "done") return false;
-    this.merge = IDLE;
+    const { look } = this;
+    if (look.merge.step !== "armed" && look.merge.step !== "done") return false;
+    look.merge = IDLE;
     cx.notify();
     return true;
   }
@@ -1113,55 +656,46 @@ export default class PullRequest extends View {
     setShared(VIEW, { ...view(), listWidth: Math.round(sizes[0]) });
   }
 
+  /** A press on a window's header, on its way up to the pane: Herdr drags the window by it. */
+  gripped() {
+    this.grip = true;
+  }
+
   pressed(cx) {
     this.handle.focus();
     this.disarm(cx);
-    // Herdr drags a window by any press its mod does not stop. Only the header's is let through: it sets `grip` on its way up.
+    // Herdr drags a window by any press its mod does not stop. Only the header's is let through.
     if (this.overlay !== null && !this.grip) cx.stop_propagation();
     this.grip = false;
   }
 
-  refresh(cx) {
-    if (this.state.phase === "replay") return void cx.spawn(async (cx) => this.readReplay(cx, this.state.file));
-    // Resolving a thread on GitHub does not move the pull request's date, so a look that is asked for reads what people wrote again.
-    this.stale = true;
-    this.due = Date.now();
-    this.pump(cx);
-  }
-
-  /** What the Merge row is right now. The row is drawn from it and a press goes by it. */
+  /** What the Merge row is right now. The row is drawn from it and a press goes by it. @returns {import("./merge.js").Offer} */
   offer(now) {
-    const s = this.state;
-    const shown = this.shown();
-    if (shown === null) return /** @type {import("./merge.js").Offer} */ ({ look: "none" });
-    const { pr } = shown.snapshot;
-    return mergeOffer(this.merge, {
-      offered: offersMerge(summarize(shown.snapshot)), replay: s.phase === "replay", live: s.phase === "showing" && liveShown(shown, s.trouble),
-      method: s.phase === "showing" ? s.method : undefined, head: pr.head, base: pr.baseRef, now,
+    const scene = this.scene();
+    if (scene === null) return { look: "none" };
+    const { snapshot, source } = scene.shown;
+    return mergeOffer(this.look.merge, {
+      offered: offersMerge(summarize(snapshot)), replay: source === "replay", live: liveShown(scene.shown, scene.trouble),
+      method: snapshot.method, head: snapshot.pr.head, base: snapshot.pr.baseRef, now,
     });
   }
 
   pressMerge(cx, held = false) {
-    if (this.merge.step === "done") this.merge = IDLE;
+    const { look } = this;
+    if (look.merge.step === "done") look.merge = IDLE;
     const now = Date.now();
     const press = mergePress(this.offer(now), { now, held });
-    if (press === "arm") this.merge = { step: "armed", head: this.snapshot().pr.head, at: now };
-    if (press === "confirm") this.merge = { step: "running", head: /** @type {Extract<MergeUi, { step: "armed" }>} */ (this.merge).head };
-    cx.notify();
-    this.pump(cx);
-  }
-
-  async runMerge(cx, gen) {
-    const s = this.showing(gen);
-    const { merge } = this;
-    if (s === null || !s.method || merge.step !== "running") {
-      this.merge = IDLE;
-      return cx.notify();
+    if (press === "arm") look.merge = { step: "armed", head: this.snapshot().pr.head, at: now };
+    if (press === "confirm") {
+      const { head } = /** @type {Extract<MergeUi, { step: "armed" }>} */ (look.merge);
+      look.merge = { step: "running", head };
+      this.watch.run(cx, async (cx, s) => {
+        const method = s?.shown?.snapshot.method ?? null;
+        look.merge = s === null || method === null ? IDLE : await confirmMerge((argv) => gh(argv, s.place), s.target, method, head);
+        cx.notify();
+        if (look === this.look) this.watch.refresh(cx);
+      });
     }
-    const done = await confirmMerge((argv) => this.gh(argv, s.place), s.target, s.method, merge.head);
-    if (gen !== this.gen) return;
-    this.merge = done;
-    this.due = Date.now();
     cx.notify();
   }
 
@@ -1179,20 +713,16 @@ export default class PullRequest extends View {
 
   /**
    * `w`: opens the pull request shown in a window that floats over the layout, most of the app's size, on the file
-   * selected. The pane stays as it is; the annotations are the same ones, kept per pull request.
+   * selected and the keyboard's place in it. The pane stays as it is; the annotations are the same ones, kept per pull
+   * request, and the window starts from what this pane has read.
    */
   popOut() {
-    if (this.state.phase !== "showing" || this.state.shown === null || this.overlay !== null) return;
-    const { target, shown } = this.state;
-    const row = selectedRow(this.rows(), this.selected);
+    const { target } = this.scene() ?? { target: null };
+    if (target === null || this.overlay !== null) return;
+    const row = selectedRow(this.rows(), this.look.selected);
     const reading = this.reader();
-    // Files whose colours are still on their way are left out: the window reads them itself, colours and all.
-    handed = { key: prKey(target), shown: shown.files?.colours === undefined ? { ...shown, files: null } : shown, reading: reading === null ? null : { ...reading } };
-    openOverlay({
-      mod: "pr", kind: "window", key: "pr", width: 0.94, height: 0.92,
-      // The pull request as this pane names it, so that the window's is the same one in what is stored.
-      props: { pr: `https://${target.host}/${target.owner}/${target.name}/pull/${target.number}`, follow: this.follow, file: row?.kind === "file" ? row.file.path : null },
-    });
+    handOver(target, row?.kind !== "file" ? null : { selected: row.key, reading: reading === null ? null : startReading(reading.path, reading.cursor, reading.anchor) });
+    openOverlay({ mod: "pr", kind: "window", key: "pr", width: 0.94, height: 0.92, props: { pr: prUrl(target), follow: this.follow } });
   }
 
   /** Herdr's last call as the pane or window goes. */

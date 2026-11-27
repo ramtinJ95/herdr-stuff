@@ -1,10 +1,11 @@
 import { prArgs } from "./query.js";
-import { firstLine, parsePr, readAnswer, shortSha } from "./github.js";
+import { parsePr, readAnswer, repoSlug, shortSha } from "./github.js";
 import { offersMerge, summarize } from "./model.js";
+import { firstLine } from "./text.js";
 
 /** @typedef {import("./github.js").Target} Target */
 /** @typedef {import("./github.js").Failure} Failure */
-/** @typedef {"merge" | "squash" | "rebase"} MergeMethod */
+/** @typedef {import("./github.js").MergeMethod} MergeMethod */
 /** @typedef {{ step: "idle" } | { step: "armed", head: string, at: number } | { step: "running", head: string } | { step: "done", ok: boolean, text: string }} MergeUi */
 /**
  * What the Merge row is right now: nothing, the outcome of a merge, a note in place of the button, or the button, off or pressable.
@@ -13,40 +14,30 @@ import { offersMerge, summarize } from "./model.js";
  *   | { look: "armed", label: string, note: string, at: number }} Offer
  */
 
-const METHODS = /** @type {const} */ ([["merge", "mergeCommitAllowed"], ["squash", "squashMergeAllowed"], ["rebase", "rebaseMergeAllowed"]]);
-
-/** The method Merge uses, from the repository in a PR_QUERY answer: the person's default when the repository allows it, else the first it allows. @returns {MergeMethod | null} */
-export function mergeMethod(repo) {
-  const allowed = METHODS.filter(([, flag]) => repo?.[flag] === true).map(([method]) => method);
-  const preferred = String(repo?.viewerDefaultMergeMethod ?? "").toLowerCase();
-  return allowed.find((method) => method === preferred) ?? allowed[0] ?? null;
-}
-
-export const mergeArgv = (target, method, head) =>
-  ["pr", "merge", String(target.number), "-R", `${target.host}/${target.owner}/${target.name}`, `--${method}`, "--match-head-commit", head];
+const mergeArgv = (target, method, head) =>
+  ["pr", "merge", String(target.number), "-R", repoSlug(target), `--${method}`, "--match-head-commit", head];
 
 /** A second press sooner than this after the first is the same press: a held key, a double-click. */
-export const MERGE_GAP_MS = 700;
+const MERGE_GAP_MS = 700;
 /** A first press nobody follows up is taken back after this long. */
-export const MERGE_ARMED_MS = 10_000;
+const MERGE_ARMED_MS = 10_000;
 
 const VERBS = { merge: "merge", squash: "squash-merge", rebase: "rebase-merge" };
 
-export const armedLine = (method, head, base) => `Press again to ${VERBS[method]} ${shortSha(head)} into ${base}`;
+const armedLine = (method, head, base) => `Press again to ${VERBS[method]} ${shortSha(head)} into ${base}`;
 
 /**
  * The one reading of Merge that the row is drawn from and a press goes by.
- * `offered` is the model's `offersMerge`; `live` says the view is GitHub's latest answer; `method` is undefined until GitHub has
- * answered with the repository's methods; `head` and `base` are the pull request's.
+ * `offered` is the model's `offersMerge`; `live` says the view is GitHub's latest answer; `method`, `head` and `base` are
+ * the snapshot's.
  * @param {MergeUi} ui
- * @param {{ offered: boolean, replay: boolean, live: boolean, method: MergeMethod | null | undefined, head: string, base: string, now: number }} facts
+ * @param {{ offered: boolean, replay: boolean, live: boolean, method: MergeMethod | null, head: string, base: string, now: number }} facts
  * @returns {Offer}
  */
 export function mergeOffer(ui, { offered, replay, live, method, head, base, now }) {
   if (ui.step === "done") return { look: "done", ok: ui.ok, text: ui.text };
   if (!offered) return { look: "none" };
   if (replay) return { look: "off", label: "Merge", note: "Off in a replay" };
-  if (method === undefined) return { look: "none" };
   if (method === null) return { look: "note", note: "This repository allows no merge method." };
   const label = `Merge (${method})`;
   if (ui.step === "running") return { look: "off", label: "Merging…", note: null };
