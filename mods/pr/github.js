@@ -17,11 +17,28 @@
  *   updatedAt: string }, checks: Check[], hidden: number, resetAt: number | null }} Snapshot
  */
 
+/** @typedef {"APPROVED" | "CHANGES_REQUESTED" | "DISMISSED" | "COMMENTED" | "PENDING"} ReviewState */
 /**
- * What a person wrote on a PR and who is on it. `asked` holds the reviewers asked who have not answered; null is one GitHub does not name.
- * @typedef {{ body: string, author: string | null, createdAt: string, updatedAt: string, labels: string[],
- *   reviews: { who: string | null, state: "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED" | "COMMENTED" | "PENDING" }[],
- *   asked: (string | null)[], comments: number, commits: number }} About
+ * What someone wrote under a pull request: a comment, with `state` null, or what a review said as it was handed in.
+ * `who` null is an account GitHub deleted.
+ * @typedef {{ who: string | null, body: string, at: string, url: string, state: ReviewState | null }} Said
+ */
+/**
+ * A thread of comments on a file's lines. `line` is where it stands in the diff as it is now, on `side`, and is null once
+ * the lines it was written on are gone, or for a thread on the file as a whole; `was` is the line it was written on.
+ * `startLine` is set for a thread on more lines than one. `more` counts the comments GitHub did not return.
+ * @typedef {{ id: string, path: string, line: number | null, startLine: number | null, side: "LEFT" | "RIGHT", startSide: "LEFT" | "RIGHT" | null,
+ *   was: number | null, resolved: boolean, outdated: boolean, canReply: boolean, canResolve: boolean, canUnresolve: boolean,
+ *   comments: Said[], more: number }} Thread
+ */
+/**
+ * What people wrote on a PR and who is on it. `asked` holds the reviewers asked who have not answered; null is one GitHub does not name.
+ * `comments` counts the plain comments. `talk` is the conversation under the description, oldest first: the latest comments
+ * and the reviews that say something, with `earlier` counting what came before them. `mine` is whether the person
+ * signed in to gh opened the pull request. `id` is the pull request as a review is addressed to it.
+ * @typedef {{ id: string, body: string, author: string | null, createdAt: string, updatedAt: string, mine: boolean, labels: string[],
+ *   reviews: { who: string | null, state: ReviewState }[],
+ *   asked: (string | null)[], comments: number, commits: number, talk: Said[], earlier: number, threads: Thread[], threadsHidden: number }} About
  */
 
 /**
@@ -183,19 +200,42 @@ export function parsePr(raw) {
  */
 export function parseAbout(raw) {
   const { p } = pullRequestOf(raw);
-  const nodes = (field) => list(obj(p[field], at(field)).nodes, at(`${field}.nodes`));
-  const count = (field) => int(obj(p[field], at(field)).totalCount, at(`${field}.totalCount`));
+  const nodes = (field, of = p, path = at(field)) => list(obj(of[field], path).nodes, `${path}.nodes`).map((n, i) => [obj(n, `${path}.nodes[${i}]`), `${path}.nodes[${i}]`]);
+  const count = (field, of = p, path = at(field)) => int(obj(of[field], path).totalCount, `${path}.totalCount`);
   const named = (actor, path) => (actor === null ? null : str(obj(actor, path).login ?? actor.name, path));
+  /** @returns {Said} */
+  const said = (n, path, state = null, time = n.createdAt) =>
+    ({ who: named(n.author, `${path}.author`), body: str(n.body, `${path}.body`), at: str(time, `${path}.createdAt`), url: str(n.url, `${path}.url`), state });
+  const side = oneOf(["LEFT", "RIGHT"]), lineOrNull = is((v) => v === null || Number.isInteger(v));
+  const comments = nodes("comments").map(([c, path]) => said(c, path));
+  // A review is part of the conversation when it says something: words of its own, or a verdict. One that only carries
+  // line comments is in the threads, and one not yet handed in has been said to nobody.
+  const reviews = nodes("reviews").map(([r, path]) => said(r, path, oneOf(REVIEW_STATES)(r.state, `${path}.state`), strOrNull(r.submittedAt, `${path}.submittedAt`) ?? r.createdAt))
+    .filter((r) => r.state !== "PENDING" && (r.state !== "COMMENTED" || r.body.trim() !== ""));
+  const threads = nodes("reviewThreads").map(([t, path]) => {
+    const line = lineOrNull(t.line, `${path}.line`), start = lineOrNull(t.startLine, `${path}.startLine`);
+    const written = nodes("comments", t, `${path}.comments`);
+    return {
+      id: str(t.id, `${path}.id`), path: str(t.path, `${path}.path`), line,
+      // GitHub gives a thread on one line that line as its start, too.
+      startLine: start === line ? null : start, side: side(t.diffSide, `${path}.diffSide`),
+      startSide: t.startDiffSide === null ? null : side(t.startDiffSide, `${path}.startDiffSide`), was: lineOrNull(t.originalLine, `${path}.originalLine`),
+      resolved: bool(t.isResolved, `${path}.isResolved`), outdated: bool(t.isOutdated, `${path}.isOutdated`),
+      canReply: bool(t.viewerCanReply, `${path}.viewerCanReply`), canResolve: bool(t.viewerCanResolve, `${path}.viewerCanResolve`),
+      canUnresolve: bool(t.viewerCanUnresolve, `${path}.viewerCanUnresolve`),
+      comments: written.map(([c, at]) => said(c, at)), more: count("comments", t, `${path}.comments`) - written.length,
+    };
+  });
   return {
-    body: str(p.body, at("body")), author: named(p.author, at("author")),
-    createdAt: str(p.createdAt, at("createdAt")), updatedAt: str(p.updatedAt, at("updatedAt")),
-    labels: nodes("labels").map((l, i) => str(obj(l, at(`labels.nodes[${i}]`)).name, at(`labels.nodes[${i}].name`))),
-    reviews: nodes("latestOpinionatedReviews").map((r, i) => {
-      const path = at(`latestOpinionatedReviews.nodes[${i}]`);
-      return { who: named(obj(r, path).author, `${path}.author`), state: oneOf(REVIEW_STATES)(r.state, `${path}.state`) };
-    }),
-    asked: nodes("reviewRequests").map((r, i) => named(obj(r, at(`reviewRequests.nodes[${i}]`)).requestedReviewer, at(`reviewRequests.nodes[${i}].requestedReviewer`))),
+    id: str(p.id, at("id")), body: str(p.body, at("body")), author: named(p.author, at("author")),
+    createdAt: str(p.createdAt, at("createdAt")), updatedAt: str(p.updatedAt, at("updatedAt")), mine: bool(p.viewerDidAuthor, at("viewerDidAuthor")),
+    labels: nodes("labels").map(([l, path]) => str(l.name, `${path}.name`)),
+    reviews: nodes("latestOpinionatedReviews").map(([r, path]) => ({ who: named(r.author, `${path}.author`), state: oneOf(REVIEW_STATES)(r.state, `${path}.state`) })),
+    asked: nodes("reviewRequests").map(([r, path]) => named(r.requestedReviewer, `${path}.requestedReviewer`)),
     comments: count("comments"), commits: count("commits"),
+    talk: [...comments, ...reviews].sort((left, right) => Date.parse(left.at) - Date.parse(right.at)),
+    earlier: count("comments") - comments.length + count("reviews") - nodes("reviews").length,
+    threads, threadsHidden: count("reviewThreads") - threads.length,
   };
 }
 

@@ -146,6 +146,19 @@ const REVIEW_WORDS = {
   COMMENTED: ["commented", "idle"], PENDING: ["is reviewing", "working"],
 };
 
+/** Who said something under the description, as what, and when. @param {import("./github.js").Said} said */
+export const saidLine = (said, now) => `${said.who ?? "A deleted account"} ${said.state === null ? "commented" : REVIEW_WORDS[said.state][0]} ${ago(Date.parse(said.at), now)}`;
+
+/** The threads on the diff in a line, or null when there are none. @param {About} about */
+export function threadsLine(about) {
+  const total = about.threads.length + about.threadsHidden;
+  if (total === 0) return null;
+  const open = about.threads.filter((thread) => !thread.resolved).length;
+  const rest = about.threadsHidden === 0 ? "" : `; ${about.threadsHidden} of them only on GitHub`;
+  const state = open > 0 ? `${open} not resolved` : about.threadsHidden === 0 ? "all resolved" : "those read here all resolved";
+  return `${plural(total, "thread")} on the diff, ${state}${rest}. They stand among the lines under Files.`;
+}
+
 /** Each reviewer and where they stand, those who answered first. @param {About} about */
 export function reviewerWords(about) {
   const who = (name) => name ?? "A reviewer GitHub does not name";

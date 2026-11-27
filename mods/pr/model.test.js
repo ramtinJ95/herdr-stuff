@@ -398,6 +398,53 @@ test("a recorded ABOUT_QUERY answer reads as who wrote what, when, with its coun
   assert.equal(about.updatedAt, "2026-11-26T18:38:40Z");
   assert.equal(about.body.length, 3696);
   assert.deepEqual([about.labels, about.reviews, about.asked, about.comments, about.commits], [[], [], [], 0, 4]);
+  assert.deepEqual([about.mine, about.talk, about.earlier, about.threads, about.threadsHidden], [true, [], 0, [], 0]);
+});
+
+test("a recorded pull request under review reads as its threads and the reviews that say something", () => {
+  const about = parseAbout(JSON.parse(readFileSync(join(fixtures, "about-cli-15081.json"), "utf8")));
+  assert.equal(about.mine, false);
+  // Six reviews were handed in: one with words, one approval, and four that only carry line comments.
+  assert.deepEqual(about.talk.map((said) => [said.who, said.state, said.body.length > 0]), [["copilot-pull-request-reviewer", "COMMENTED", true], ["BagToad", "APPROVED", false]]);
+  assert.ok(Date.parse(about.talk[0].at) < Date.parse(about.talk[1].at));
+  assert.deepEqual([about.comments, about.earlier, about.threads.length, about.threadsHidden], [0, 0, 6, 0]);
+  const [first, second] = about.threads;
+  assert.deepEqual({ ...first, comments: first.comments.length, id: typeof first.id }, {
+    id: "string", path: "pkg/cmd/event/shared/hint.go", line: 35, startLine: 33, side: "RIGHT", startSide: "RIGHT", was: 35, resolved: false, outdated: false,
+    canReply: true, canResolve: false, canUnresolve: false, comments: 1, more: 0,
+  });
+  // GitHub names a one-line thread's line as its start as well.
+  assert.deepEqual([second.line, second.startLine, second.startSide], [15, null, null]);
+  assert.deepEqual(about.threads.map((thread) => [thread.resolved, thread.comments.length]), [[false, 1], [false, 1], [true, 2], [true, 2], [true, 2], [true, 2]]);
+  assert.match(first.comments[0].url, /^https:\/\/github\.com\/cli\/cli\/pull\/15081#discussion_r\d+$/);
+});
+
+test("synthetic: the conversation is the comments and the reviews in the order they were written, without a review not handed in", () => {
+  const raw = aboutAnswer();
+  const said = (login, body, createdAt, extra = {}) => ({ author: login === null ? null : { login }, body, createdAt, url: `https://github.com/o/n/pull/1#${createdAt}`, ...extra });
+  Object.assign(raw.data.repository.pullRequest, {
+    comments: { totalCount: 40, nodes: [said("ada", "First.", "2026-11-20T10:00:00Z"), said(null, "Third.", "2026-11-20T12:00:00Z")] },
+    reviews: { totalCount: 5, nodes: [
+      said("bo", "Second.", "2026-11-20T09:00:00Z", { state: "CHANGES_REQUESTED", submittedAt: "2026-11-20T11:00:00Z" }),
+      said("cy", "", "2026-11-20T11:30:00Z", { state: "COMMENTED", submittedAt: "2026-11-20T11:30:00Z" }),
+      said("me", "Not yet.", "2026-11-20T13:00:00Z", { state: "PENDING", submittedAt: null }),
+    ] },
+    // As GitHub answered for an outdated thread of cli/cli#15100.
+    reviewThreads: { totalCount: 101, nodes: [{
+      id: "T1", isResolved: true, isOutdated: true, path: "a.go", line: null, startLine: null, originalLine: 175, diffSide: "RIGHT", startDiffSide: null,
+      viewerCanReply: true, viewerCanResolve: false, viewerCanUnresolve: true, comments: { totalCount: 31, nodes: [said("ada", "Old.", "2026-11-20T10:00:00Z")] },
+    }] },
+  });
+  const about = parseAbout(raw);
+  assert.deepEqual(about.talk.map((one) => [one.who, one.body, one.state, one.at]), [
+    ["ada", "First.", null, "2026-11-20T10:00:00Z"], ["bo", "Second.", "CHANGES_REQUESTED", "2026-11-20T11:00:00Z"], [null, "Third.", null, "2026-11-20T12:00:00Z"]]);
+  assert.deepEqual([about.comments, about.earlier, about.threadsHidden], [40, 40, 100]);
+  assert.deepEqual({ ...about.threads[0], comments: about.threads[0].comments.length }, {
+    id: "T1", path: "a.go", line: null, startLine: null, side: "RIGHT", startSide: null, was: 175, resolved: true, outdated: true,
+    canReply: true, canResolve: false, canUnresolve: true, comments: 1, more: 30,
+  });
+  raw.data.repository.pullRequest.reviewThreads.nodes[0].diffSide = "MIDDLE";
+  assert.throws(() => parseAbout(raw), (e) => e instanceof GhError && /MIDDLE/.test(e.text));
 });
 
 test("synthetic: labels, reviews and asked reviewers read by name; a deleted author and an unnamed team read as null", () => {

@@ -1,9 +1,12 @@
 /**
  * What a person notes on a pull request's diff while reading it, and what the tab's agent is sent of it. The notes and
  * their words are those of the review-pane mod for Claude Code, which keeps them on a response; here they are on a diff.
+ * GitHub's own review threads stand among the same lines, and the notes can be posted there as a review.
  */
+import { plural } from "./model.js";
 
 /** @typedef {import("./diff.js").DiffRow} DiffRow */
+/** @typedef {import("./github.js").Thread} Thread */
 /** @typedef {"issue" | "suggestion" | "question" | "comment"} Kind */
 /**
  * Where an annotation points: a stretch of one file's diff rows as they were at commit `head`, with the words for the
@@ -16,6 +19,8 @@
  */
 /** @typedef {{ annotations: Annotation[], nextId: number }} Review */
 /** An annotation being typed: a new one, or `editingId`'s. @typedef {{ kind: Kind, target: Target | null, editingId: string | null }} Draft */
+/** One line comment of a review, as GitHub takes it. @typedef {{ path: string, startLine?: number, startSide?: "LEFT" | "RIGHT", line: number, side: "LEFT" | "RIGHT", body: string }} LineComment */
+/** A review as GitHub takes it. @typedef {{ commit: string, event: "COMMENT" | "APPROVE", body: string, comments: LineComment[] }} Posting */
 /** The pull request, as the agent is told of it. @typedef {{ ref: string, title: string, url: string, head: string }} Subject */
 
 /** How each kind is named and marked, in the order the gutter prefers one mark over another. */
@@ -34,6 +39,7 @@ export const EMPTY = { annotations: [], nextId: 1 };
 export const REVIEW_KEYS = {
   j: "down", down: "down", k: "up", up: "up", d: "half-down", u: "half-up", g: "first", b: "last", "shift-g": "last", v: "range",
   c: "comment", s: "suggestion", i: "issue", a: "question", o: "overall", h: "previous", l: "next", r: "edit", x: "delete", y: "finish",
+  "shift-y": "post", "shift-a": "approve", z: "resolve", f: "forward",
   enter: "confirm", n: "next-file", p: "previous-file", w: "window", escape: "escape", q: "close",
 };
 const MOVES = { down: () => 1, up: () => -1, "half-down": (page) => page, "half-up": (page) => -page, first: () => -Infinity, last: () => Infinity };
@@ -101,29 +107,60 @@ export function stepAnnotation(ordered, activeId, delta) {
   return ordered[(base + delta + ordered.length) % ordered.length];
 }
 
+const rowAt = (rows, side, line) => rows.findIndex((row) => row.kind !== "hunk" && row.kind !== "note" && row[side === "LEFT" ? "old" : "new"] === line);
+
 /**
- * @typedef {{ type: "line", row: DiffRow, index: number, mark: Kind | null }
- *   | { type: "annotation", annotation: Annotation, moved: boolean }} Item
+ * The rows of a file's diff a GitHub thread is on, the last being the line it stands under; null when the diff does not
+ * have that line: the thread is outdated, is on the file as a whole, or its line is outside what the diff shows.
+ * @param {DiffRow[]} rows @param {Thread} thread @returns {{ start: number, end: number } | null}
+ */
+export function threadStretch(rows, thread) {
+  const end = thread.line === null ? -1 : rowAt(rows, thread.side, thread.line);
+  if (end < 0) return null;
+  const first = thread.startLine === null ? -1 : rowAt(rows, thread.startSide ?? thread.side, thread.startLine);
+  return { start: first >= 0 && first < end ? first : end, end };
+}
+
+/** Where a thread is, in words. `placed` is whether the diff has its line. @param {Thread} thread */
+export function threadWhere(thread, placed) {
+  if (thread.line === null) {
+    if (!thread.outdated) return "the file as a whole";
+    return thread.was === null ? "lines that have changed since" : `line ${thread.was} when it was written, changed since`;
+  }
+  return `${span(thread.startLine ?? thread.line, thread.line)}${thread.side === "LEFT" ? " before the change" : ""}${placed ? "" : ", outside the diff shown"}`;
+}
+
+/**
+ * @typedef {{ type: "line", row: DiffRow, index: number, mark: Kind | "thread" | null }
+ *   | { type: "annotation", annotation: Annotation, moved: boolean }
+ *   | { type: "thread", thread: Thread, placed: boolean }} Item
  */
 
 /**
- * A file's diff with its annotations among the lines: each under the last line it covers, and above them all those
- * written at another commit, whose rows these may no longer be. `at[i]` is where row `i` stands in `items`.
- * @param {DiffRow[]} rows @param {Annotation[]} annotations
+ * A file's diff with what is noted on it among the lines: each annotation under the last line it covers, and each of
+ * GitHub's `threads` under its line. Above them all stand the annotations written at another commit, whose rows these
+ * may no longer be, and the threads whose line the diff does not have. `at[i]` is where row `i` stands in `items`.
+ * @param {DiffRow[]} rows @param {Annotation[]} annotations @param {Thread[]} [threads]
  * @returns {{ items: Item[], at: number[] }}
  */
-export function annotatedRows(rows, annotations, path, head) {
+export function annotatedRows(rows, annotations, path, head, threads = []) {
   const mine = annotations.filter((one) => one.target?.path === path);
   const here = (one) => one.target.head === head && one.target.end < rows.length;
   const placed = sortAnnotations(mine.filter(here), [path]);
+  const said = threads.filter((thread) => thread.path === path).map((thread) => ({ thread, on: threadStretch(rows, thread) }));
   /** @type {Item[]} */
-  const items = mine.filter((one) => !here(one)).map((annotation) => ({ type: "annotation", annotation, moved: true }));
+  const items = [
+    ...mine.filter((one) => !here(one)).map((annotation) => /** @type {Item} */ ({ type: "annotation", annotation, moved: true })),
+    ...said.filter(({ on }) => on === null).map(({ thread }) => /** @type {Item} */ ({ type: "thread", thread, placed: false })),
+  ];
   const at = [];
   rows.forEach((row, index) => {
     const over = placed.filter((one) => one.target.start <= index && one.target.end >= index).map((one) => one.kind);
+    const talked = said.some(({ on }) => on !== null && on.start <= index && on.end >= index);
     at.push(items.length);
-    items.push({ type: "line", row, index, mark: /** @type {Kind | undefined} */ (ORDER.find((kind) => over.includes(kind))) ?? null });
+    items.push({ type: "line", row, index, mark: /** @type {Kind | undefined} */ (ORDER.find((kind) => over.includes(kind))) ?? (talked ? "thread" : null) });
     for (const annotation of placed) if (annotation.target.end === index) items.push({ type: "annotation", annotation, moved: false });
+    for (const { thread, on } of said) if (on?.end === index) items.push({ type: "thread", thread, placed: true });
   });
   return { items, at };
 }
@@ -135,11 +172,53 @@ export function activeAnnotation(annotations, activeId, path, head, cursor) {
     ?? null;
 }
 
+/**
+ * What a key acts on: the annotation or thread stepped to or clicked, else the first annotation on the cursor's row,
+ * else the first thread on it. One of the two at most is set.
+ * @param {Annotation[]} annotations @param {Thread[]} threads @param {DiffRow[]} rows the rows of the file at `path`
+ * @returns {{ annotation: Annotation | null, thread: Thread | null }}
+ */
+export function activeNote(annotations, threads, activeId, path, head, rows, cursor) {
+  const stepped = threads.find((thread) => thread.id === activeId);
+  if (stepped !== undefined) return { annotation: null, thread: stepped };
+  const annotation = activeAnnotation(annotations, activeId, path, head, cursor);
+  if (annotation !== null) return { annotation, thread: null };
+  const under = threads.find((thread) => {
+    const on = thread.path === path ? threadStretch(rows, thread) : null;
+    return on !== null && on.start <= cursor && on.end >= cursor;
+  });
+  return { annotation: null, thread: under ?? null };
+}
+
+/**
+ * Where `h` and `l` stop: every annotation and every thread, the whole pull request's first, then by file in the order
+ * of `paths` and by row. `row` is the diff row to put the cursor on, 0 for what has no row of its own. `rowsOf` gives a
+ * file's diff rows by path, none for a file without a diff.
+ * @param {Annotation[]} annotations @param {Thread[]} threads @param {string[]} paths @param {(path: string) => DiffRow[]} rowsOf
+ * @returns {{ id: string, path: string | null, row: number }[]}
+ */
+export function stops(annotations, threads, paths, head, rowsOf) {
+  const file = (path) => (path === null ? -1 : paths.includes(path) ? paths.indexOf(path) : paths.length);
+  const noted = sortAnnotations(annotations, paths).map(({ id, target }) => ({ id, path: target?.path ?? null, row: target === null || target.head !== head ? 0 : target.start }));
+  const said = threads.map((thread) => ({ id: thread.id, path: thread.path, row: threadStretch(rowsOf(thread.path), thread)?.end ?? 0 }));
+  return [...noted, ...said].sort((left, right) => file(left.path) - file(right.path) || left.row - right.row);
+}
+
 /** How many annotations are on each file, by path. @param {Annotation[]} annotations @returns {Map<string, number>} */
 export function countByPath(annotations) {
   const counts = new Map();
   for (const { target } of annotations) if (target !== null) counts.set(target.path, (counts.get(target.path) ?? 0) + 1);
   return counts;
+}
+
+/** The threads on each file in words, by path: those still open, else how many are resolved. @param {Thread[]} threads @returns {Map<string, { text: string, open: boolean }>} */
+export function threadsByPath(threads) {
+  const counts = new Map();
+  for (const { path, resolved } of threads) {
+    const one = counts.get(path) ?? { open: 0, resolved: 0 };
+    counts.set(path, resolved ? { ...one, resolved: one.resolved + 1 } : { ...one, open: one.open + 1 });
+  }
+  return new Map([...counts].map(([path, { open, resolved }]) => [path, open > 0 ? { text: plural(open, "thread"), open: true } : { text: `${resolved} resolved`, open: false }]));
 }
 
 /** How sending a question stands, in words; null for what is not a question. `sending` holds the ids on their way. @param {Annotation} one @param {Set<string>} sending */
@@ -198,6 +277,85 @@ export function formatQuestion(subject, question) {
     "",
     `Question: ${question.body}`,
   ].join("\n");
+}
+
+const quoted = (rows, start, end) => rows.slice(start, end + 1).map((row) => PREFIX[row.kind] + row.text);
+
+/**
+ * One of GitHub's threads as the agent is sent it: where it is, the lines it is on when the diff has them, and all that
+ * was written in it.
+ * @param {Subject} subject @param {Thread} thread @param {DiffRow[]} rows the rows of the thread's file
+ */
+export function formatThread(subject, thread, rows) {
+  const on = threadStretch(rows, thread);
+  const state = [thread.resolved ? "resolved" : null, thread.outdated ? "outdated" : null].filter((word) => word !== null);
+  return [
+    `I am reading ${named(subject)} at commit ${short(subject.head)} in a pane beside this terminal. Please address this review thread on it.`,
+    "",
+    `Location: \`${thread.path}\` ${threadWhere(thread, on !== null)}${state.length === 0 ? "" : ` (${state.join(", ")})`}`,
+    ...on === null ? [] : ["", "The lines it is on:", ...fence(quoted(rows, on.start, on.end))],
+    "",
+    `The thread${thread.comments.length === 0 ? "" : ` (${thread.comments[0].url})`}:`,
+    ...thread.comments.flatMap((said) => ["", `${said.who ?? "A deleted account"} wrote:`, ...said.body.split("\n").map((text) => (text === "" ? ">" : `> ${text}`))]),
+    ...thread.more === 0 ? [] : ["", `${plural(thread.more, "more comment")} on GitHub.`],
+  ].join("\n");
+}
+
+/**
+ * Where on GitHub a stretch of diff rows is: the line it ends on and the side that line is on, and for more lines than
+ * one where it starts. GitHub takes a stretch within one hunk, so one that crosses hunks keeps the part in its last;
+ * null when it covers no line at all, only a hunk's header.
+ * @param {DiffRow[]} rows @returns {Omit<LineComment, "path" | "body"> | null}
+ */
+export function githubLines(rows, start, end) {
+  const isLine = (row) => row !== undefined && row.kind !== "hunk" && row.kind !== "note";
+  let last = end;
+  while (last >= start && !isLine(rows[last])) last--;
+  if (last < start) return null;
+  let first = last;
+  while (first > start && isLine(rows[first - 1])) first--;
+  const side = rows[last].kind === "del" ? "LEFT" : "RIGHT";
+  // A stretch that ends on a removed line is on the old side throughout: an added line before it has no place there.
+  if (side === "LEFT") while (rows[first].old === null) first++;
+  const line = side === "LEFT" ? rows[last].old : rows[last].new;
+  if (first === last) return { line, side };
+  const startSide = side === "LEFT" || rows[first].kind === "del" ? "LEFT" : "RIGHT";
+  return { startLine: startSide === "LEFT" ? rows[first].old : rows[first].new, startSide, line, side };
+}
+
+/**
+ * The annotations as a review for GitHub: one line comment each, on the lines it was written on. What has no line there
+ * goes in the review's own words, with the lines quoted: a note on the whole pull request, one written at an earlier
+ * commit, one on a hunk's header. Questions are left out, as they are from the review the agent is sent.
+ * @param {Annotation[]} annotations @param {string[]} paths @param {(path: string) => DiffRow[]} rowsOf a file's diff rows at `head`
+ * @param {Posting["event"]} event @returns {Posting}
+ */
+export function postingOf(annotations, paths, head, rowsOf, event) {
+  const comments = [], loose = [];
+  for (const one of sortAnnotations(toSend(annotations), paths)) {
+    const { target } = one;
+    const lines = target === null || target.head !== head ? null : githubLines(rowsOf(target.path), target.start, target.end);
+    const label = KINDS[one.kind].label;
+    if (lines !== null) comments.push({ path: target.path, ...lines, body: one.kind === "comment" ? one.body : `**${label}:** ${one.body}` });
+    else if (target === null) loose.push(one.body);
+    else loose.push([`**${label}** on ${place(target, head)}:`, "", ...fence(target.quote), "", one.body].join("\n"));
+  }
+  return { commit: head, event, body: loose.join("\n\n"), comments };
+}
+
+/**
+ * Why a review cannot be posted on GitHub right now, or null when it can. An approval needs no annotations, but is
+ * not GitHub's to take from the person who opened the pull request, nor on one that is no longer open.
+ * @param {{ event: Posting["event"], count: number, live: boolean, busy: boolean, mine: boolean | null, state: string }} at
+ *   `mine` is null until GitHub has said who opened it, which comes with the pull request's id, a review's address
+ */
+export function postBlock({ event, count, live, busy, mine, state }) {
+  if (busy) return "A review is on its way to GitHub.";
+  if (!live) return "Not until GitHub answers again.";
+  if (mine === null) return "Still reading what is on GitHub: try again in a moment.";
+  if (event === "COMMENT") return count === 0 ? "Nothing to post yet: c, s or i notes the line." : null;
+  if (state !== "OPEN") return "It is no longer open: there is nothing to approve.";
+  return mine ? "GitHub does not take your approval of your own pull request." : null;
 }
 
 /**
