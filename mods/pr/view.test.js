@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { byName, parsePin, prRef, shortSha } from "./github.js";
 import { summarize } from "./model.js";
-import { FILES_SHOWN, aboutLine, ago, blockerWords, currentStep, failureLines, headlineOf, liveShown, moveSelection, paneRows, reviewerWords, rowUrl, rowsOf, saidLine, selectedRow, stepLink, threadsLine } from "./view.js";
+import { FILES_SHOWN, aboutLine, ago, blockerWords, currentStep, detailOf, failureLines, headlineOf, liveShown, moveSelection, paneRows, reviewerWords, rowIndex, rowUrl, rowsOf, saidLine, saidTone, selectedRow, stepLink, threadsLine } from "./view.js";
 
 let ids = 0;
 const check = (bucket, extra = {}) => ({
@@ -191,4 +192,35 @@ test("reviewers who answered come first with where they stand, then those still 
     { text: "cy is asked to review", tone: "idle" }, { text: "A reviewer GitHub does not name is asked to review", tone: "idle" },
   ]);
   assert.deepEqual(reviewerWords(about()), []);
+});
+
+test("synthetic: the detail drawn is the selected file or check, once opened in a narrow pane and always in a wide one", () => {
+  const file = { kind: "file", key: "file:a.ts", file: { path: "a.ts" } };
+  const check = { kind: "check", key: "c1", check: { id: "c1" } };
+  const rows = [{ kind: "about", key: "about", open: true }, { kind: "files", key: "files", open: true, count: 1 }, file, check];
+  assert.equal(detailOf(rows, "file:a.ts", true, false), file);
+  assert.equal(detailOf(rows, "file:a.ts", false, false), null);
+  assert.equal(detailOf(rows, "c1", false, true), check);
+  assert.equal(detailOf(rows, "about", true, true), null);
+  assert.equal(rowIndex(rows, "c1"), 3);
+  assert.equal(rowIndex(rows, "gone"), 3, "a key no row has falls back to the first check");
+});
+
+test("synthetic: a failure's headline says whether it names the pinned pull request itself", () => {
+  assert.equal(failureLines({ kind: "no-pr", text: "x" }, null, 0, "cli/cli#9").named, true);
+  assert.equal(failureLines({ kind: "offline", text: "x" }, null, 0, "cli/cli#9").named, false);
+  assert.equal(failureLines({ kind: "no-pr", text: "x" }, null, 0).named, false);
+});
+
+test("synthetic: what was said has its review's tone, and a plain comment none", () => {
+  const said = (state) => ({ who: "ada", body: "", at: "2026-11-26T00:00:00Z", url: "u", state });
+  assert.deepEqual([null, "APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"].map((state) => saidTone(said(state))), ["idle", "done", "blocked", "idle", "idle"]);
+});
+
+test("synthetic: a pull request, a commit and an author are written one way", () => {
+  assert.equal(prRef(parsePin("cli/cli#15081")), "cli/cli#15081");
+  assert.equal(prRef(parsePin("https://ghe.example.com/team/app/pull/7/files")), "team/app#7");
+  assert.equal(shortSha("94e5a03ca65b12a53bc7850e4d1835a7743f60f0"), "94e5a03");
+  assert.equal(byName(null), "A deleted account");
+  assert.equal(byName("ada"), "ada");
 });

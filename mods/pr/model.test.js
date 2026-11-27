@@ -5,11 +5,11 @@ import { join } from "node:path";
 import { GhError, classifyFailure, classifyRejection, frameAnswer, mergeSteps, parseAbout, parseLookup, parsePin, parsePr, prLookupArgs } from "./github.js";
 import { POLL, describeFailure, duration, failureDelay, groups, keepSteps, nextPollDelay, offersMerge, stepsWanted, summarize, troubleAfter } from "./model.js";
 import { stepsArgs } from "./query.js";
-import { FAILED, PASSED, PENDING, RUNNING, SETTLED, committed, fixtures, frame, recordings, snapshotOf } from "./recorded.js";
+import { FAILED, PASSED, PENDING, RUNNING, SETTLED, committed, frame, readJson, recordings, snapshotOf } from "./recorded.js";
 
 const here = new URL(".", import.meta.url).pathname;
-const failures = JSON.parse(readFileSync(join(fixtures, "failures.json"), "utf8"));
-const live = JSON.parse(readFileSync(join(fixtures, "live.json"), "utf8"));
+const failures = readJson("failures.json");
+const live = readJson("live.json");
 
 const run = (commit, name) => {
   const node = commit.statusCheckRollup.contexts.nodes.find((n) => n.name === name);
@@ -389,7 +389,7 @@ test("duration", () => {
   assert.equal(duration(null, null, 0), "");
 });
 
-const aboutAnswer = () => JSON.parse(readFileSync(join(fixtures, "about-first-game-146.json"), "utf8"));
+const aboutAnswer = () => readJson("about-first-game-146.json");
 
 test("a recorded ABOUT_QUERY answer reads as who wrote what, when, with its counts", () => {
   const about = parseAbout(aboutAnswer());
@@ -402,7 +402,7 @@ test("a recorded ABOUT_QUERY answer reads as who wrote what, when, with its coun
 });
 
 test("a recorded pull request under review reads as its threads and the reviews that say something", () => {
-  const about = parseAbout(JSON.parse(readFileSync(join(fixtures, "about-cli-15081.json"), "utf8")));
+  const about = parseAbout(readJson("about-cli-15081.json"));
   assert.equal(about.mine, false);
   // Six reviews were handed in: one with words, one approval, and four that only carry line comments.
   assert.deepEqual(about.talk.map((said) => [said.who, said.state, said.body.length > 0]), [["copilot-pull-request-reviewer", "COMMENTED", true], ["BagToad", "APPROVED", false]]);

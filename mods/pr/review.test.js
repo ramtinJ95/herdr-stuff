@@ -1,12 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { parseAbout, parseFiles } from "./github.js";
 import { patchRows } from "./diff.js";
 import { replyArgs, resolveArgs, reviewArgs } from "./query.js";
-import { fixtures } from "./recorded.js";
-import { EMPTY, REVIEW_KEYS, activeAnnotation, activeNote, agentOf, annotatedRows, askWords, countByPath, dropAnnotation, formatQuestion, formatReview, formatThread,
+import { readJson } from "./recorded.js";
+import { EMPTY, REVIEW_KEYS, activeNote, keyOnly, agentOf, annotatedRows, askWords, countByPath, dropAnnotation, formatQuestion, formatReview, formatThread,
   githubLines, isMove, markAsked, moveCursor, postBlock, postingOf, saveDraft, sendResult, sortAnnotations, stepAnnotation, stops, stretch, targetOf, threadStretch,
   threadWhere, threadsByPath, toSend, whereOf } from "./review.js";
 
@@ -105,10 +103,10 @@ test("an annotation of another commit, or past the end of the diff, stands above
 
 test("the annotation a key acts on is the one stepped to, else the first on the cursor's line of this commit", () => {
   const { annotations } = reviewOf(["comment", on(1, 3), "wide"], ["issue", on(2, 2), "narrow"], ["issue", on(2, 2, "src/a.js", "0000000"), "old"]);
-  assert.equal(activeAnnotation(annotations, null, "src/a.js", HEAD, 2).body, "wide");
-  assert.equal(activeAnnotation(annotations, "a2", "src/a.js", HEAD, 5).body, "narrow");
-  assert.equal(activeAnnotation(annotations, null, "src/a.js", HEAD, 5), null);
-  assert.equal(activeAnnotation(annotations, null, "src/b.js", HEAD, 2), null);
+  assert.equal(activeNote(annotations, [], null, "src/a.js", HEAD, [], 2).annotation.body, "wide");
+  assert.equal(activeNote(annotations, [], "a2", "src/a.js", HEAD, [], 5).annotation.body, "narrow");
+  assert.equal(activeNote(annotations, [], null, "src/a.js", HEAD, [], 5).annotation, null);
+  assert.equal(activeNote(annotations, [], null, "src/b.js", HEAD, [], 2).annotation, null);
 });
 
 test("files are counted by what is noted on them", () => {
@@ -182,7 +180,7 @@ test("a question is sent with where it points and the lines it is about", () => 
 });
 
 test("a real diff's lines are quoted as GitHub gave them", () => {
-  const [file] = parseFiles(JSON.parse(readFileSync(join(fixtures, "files-first-game-146.json"), "utf8")));
+  const [file] = parseFiles(readJson("files-first-game-146.json"));
   const real = patchRows(file.patch);
   const target = targetOf(file.path, HEAD, real, 0, real.length - 1);
   assert.equal(target.quote.join("\n"), file.patch.replaceAll("\t", "    "));
@@ -197,7 +195,7 @@ test("what is sent goes to the tab's agent: the terminal the pane follows when i
   assert.deepEqual(agentOf([shell, claude, named], "1", null), { terminal: "t3", name: "reviewer" });
   assert.deepEqual(agentOf([shell, claude], null, "vps"), { terminal: "vps/t2", name: "Claude Code" });
   assert.deepEqual(agentOf([shell, pane("4", { status: "working" })], null, null), { terminal: "t4", name: "zsh" });
-  assert.deepEqual(agentOf([shell, { pane: "9", terminal: null, mod: "pr", tab: "tab" }], "1", null), { terminal: null, why: "No agent in this tab to send it to." });
+  assert.deepEqual(agentOf([shell, { pane: "9", terminal: null, mod: "pr", tab: "tab" }], "1", null), { terminal: null, name: "the agent", why: "No agent in this tab to send it to." });
 });
 
 test("a send that hc refuses says why in hc's words", () => {
@@ -213,7 +211,6 @@ const thread = (extra = {}) => ({
   canReply: true, canResolve: true, canUnresolve: false, more: 0,
   comments: [{ who: "ada", body: "Why 3?", at: "2026-11-20T10:00:00Z", url: "https://github.com/octo/site/pull/7#discussion_r1", state: null }], ...extra,
 });
-const readJson = (name) => JSON.parse(readFileSync(join(fixtures, name), "utf8"));
 
 test("a recorded pull request's threads each stand under the line GitHub names, and a thread on several lines starts at its first", () => {
   const { threads } = parseAbout(readJson("about-cli-15081.json"));
@@ -384,4 +381,15 @@ test("a review is posted only on GitHub's latest answer; an approval only of an 
   assert.equal(postBlock({ ...approve, mine: null }), "Still reading what is on GitHub: try again in a moment.");
   assert.equal(postBlock({ ...at, mine: null }), "Still reading what is on GitHub: try again in a moment.");
   assert.equal(postBlock({ ...approve, state: "MERGED" }), "It is no longer open: there is nothing to approve.");
+});
+
+test("synthetic: an approval and the Enter that confirms one are given by key only; everything else may come as a command", () => {
+  const approval = { what: "post", event: "APPROVE" };
+  assert.equal(keyOnly("approve", null), true);
+  assert.equal(keyOnly("confirm", approval), true);
+  assert.equal(keyOnly("confirm", { what: "post", event: "COMMENT" }), false);
+  assert.equal(keyOnly("confirm", { what: "send" }), false);
+  assert.equal(keyOnly("confirm", null), false);
+  const others = Object.values(REVIEW_KEYS).filter((action) => action !== "approve");
+  assert.deepEqual(others.filter((action) => keyOnly(action, action === "confirm" ? null : approval)), []);
 });

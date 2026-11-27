@@ -2,12 +2,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseFiles } from "../github.js";
 import { ROLES, coloursOf, diffOf, helperInput, patchRows } from "../diff.js";
-import { fixtures } from "../recorded.js";
+import { readJson } from "../recorded.js";
 
 const here = new URL(".", import.meta.url).pathname;
 const installed = existsSync(join(here, "node_modules/@pierre/diffs"));
@@ -28,7 +28,7 @@ const file = (path, patch, extra = {}) => ({ path, previous: null, status: "modi
 const roleOf = (spans, text) => ROLES[spans.find(([, part]) => part.trim() === text)?.[0]];
 
 test("the helper's lines are the pane's rows for every file of a recorded pull request, so each diff is drawn coloured", { skip }, () => {
-  const files = parseFiles(JSON.parse(readFileSync(join(fixtures, "files-first-game-146.json"), "utf8")));
+  const files = parseFiles(readJson("files-first-game-146.json"));
   const { byPath, note } = colours(files);
   assert.equal(note, null);
   for (const f of files) {
