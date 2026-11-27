@@ -141,8 +141,8 @@ function tableRow(input) {
 }
 
 function stateTable() {
-  const readme = readFileSync(join(here, "README.md"), "utf8");
-  const lines = readme.slice(readme.indexOf("| Case |")).split("\n");
+  const internals = readFileSync(join(here, "docs/internals.md"), "utf8");
+  const lines = internals.slice(internals.indexOf("| Case |")).split("\n");
   const end = lines.findIndex((l) => !l.startsWith("|"));
   return lines.slice(2, end).map((l) => {
     const [name, input, ...expected] = l.slice(1, -1).split("|").map((c) => c.trim());
@@ -151,7 +151,7 @@ function stateTable() {
 }
 const table = stateTable();
 
-test("the README's state table and the cases built here are the same set", () => {
+test("the state table in docs/internals.md and the cases built here are the same set", () => {
   assert.deepEqual(table.map((r) => r.name).sort(), Object.keys(CASES).sort());
 });
 

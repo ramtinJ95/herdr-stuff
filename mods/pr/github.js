@@ -328,7 +328,7 @@ export const shortSha = (sha) => sha.slice(0, 7);
 /** Who wrote or opened something: GitHub answers no author for an account it deleted. @param {string | null} who */
 export const byName = (who) => who ?? "A deleted account";
 
-/** What gh's stderr says went wrong, first match wins. The README lists which texts were seen from a real gh. */
+/** What gh's stderr says went wrong, first match wins. docs/internals.md lists which texts were seen from a real gh. */
 const STDERR = [
   ["no-repo", /not a git repository|no git remotes found|none of the git remotes configured for this repository point to a known GitHub host|Could not resolve to a Repository/],
   ["no-auth", /Bad credentials|HTTP 401/],
