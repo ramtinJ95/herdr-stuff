@@ -2,8 +2,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { prLookupArgs } from "./github.js";
-import { prArgs, stepsArgs } from "./query.js";
+import { lookupArgs, prArgs, stepsArgs } from "./query.js";
 
 const [repo, number] = (process.argv[2] ?? "").split("#");
 if (!repo || !number) {
@@ -39,7 +38,7 @@ const detached = repoDir(join(tmp, "detached"), { remote: `https://github.com/${
 git(detached, "checkout", "-q", "--detach");
 const noConfig = join(tmp, "no-config");
 mkdirSync(noConfig);
-const lookup = prLookupArgs();
+const lookup = lookupArgs();
 
 const seen = [
   ["no-repo", "a folder outside any git repository", plain, lookup],
@@ -72,8 +71,8 @@ const found = await run("gh", [...lookup, number, "-R", repo]);
 const pr = await run("gh", prArgs({ host: "github.com", owner, name, number: Number(number) }));
 const nodes = JSON.parse(pr.stdout).data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.nodes;
 const ids = nodes.filter((n) => n.__typename === "CheckRun").slice(0, 2).map((n) => n.id);
-const steps = await run("gh", stepsArgs(ids));
-const partial = await run("gh", stepsArgs([ids[0], "CR_kwDOVrn0cM8AAAAAAAAAAA"]));
+const steps = await run("gh", stepsArgs("github.com", ids));
+const partial = await run("gh", stepsArgs("github.com", [ids[0], "CR_kwDOVrn0cM8AAAAAAAAAAA"]));
 
 writeFileSync(join(out, "failures.json"), `${JSON.stringify({ gh: execFileSync("gh", ["--version"]).toString().split("\n")[0], samples, rejections }, null, 1)}\n`);
 writeFileSync(join(out, "live.json"), `${JSON.stringify({ lookup: found.stdout, pr: JSON.parse(pr.stdout), steps: JSON.parse(steps.stdout),

@@ -19,7 +19,7 @@ const CONTEXTS = `
   }`;
 
 /** The poll. The repository's merge methods ride along, so Merge needs no call of its own. */
-export const PR_QUERY = `
+const PR_QUERY = `
 query($owner: String!, $name: String!, $number: Int!, $steps: Boolean!) {
   rateLimit { resetAt }
   repository(owner: $owner, name: $name) {
@@ -35,7 +35,7 @@ query($owner: String!, $name: String!, $number: Int!, $steps: Boolean!) {
   }
 }`;
 
-export const STEPS_QUERY = `
+const STEPS_QUERY = `
 query($ids: [ID!]!) {
   nodes(ids: $ids) { ... on CheckRun { id steps(first: 60) ${STEP_FIELDS} } }
 }`;
@@ -46,7 +46,7 @@ const SAID = "author { login } body createdAt url";
  * What people wrote and who is on it: the description, the conversation under it and the threads on the diff's lines.
  * None of it moves with CI, so the pane asks again only when the PR's `updatedAt` moves, or after it has written there itself.
  */
-export const ABOUT_QUERY = `
+const ABOUT_QUERY = `
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
@@ -105,7 +105,7 @@ const literal = (value) => (typeof value === "number" ? String(value) : JSON.str
  * cannot say a list of comments (it gathers `-f` and `-F` fields apart, so a comment's words and its line number land in
  * different comments), and gh has no stdin here to read a body from.
  * @param {string} id the pull request's node id
- * @param {import("./review.js").Posting} posting
+ * @param {import("./send.js").Posting} posting
  */
 export function reviewArgs(host, id, { commit, event, body, comments }) {
   const thread = ({ path, startLine, startSide, line, side, body }) => `{ path: ${literal(path)}, `
@@ -125,8 +125,11 @@ export function reviewArgs(host, id, { commit, event, body, comments }) {
 export const filesArgs = (target) =>
   ["api", "--hostname", target.host, `repos/${target.owner}/${target.name}/pulls/${target.number}/files?per_page=100`, "--paginate", "--slurp"];
 
+/** gh's own lookup of the pull request for the branch checked out in the folder it runs in. */
+export const lookupArgs = () => ["pr", "view", "--json", "url"];
+
 /** The args for the steps of these check runs. GitHub rejects an empty list, so this throws on one. */
-export function stepsArgs(ids, host = "github.com") {
+export function stepsArgs(host, ids) {
   if (ids.length === 0) throw new Error("stepsArgs needs at least one check id");
   return graphqlArgs(host, STEPS_QUERY, ids.flatMap((id) => ["-f", `ids[]=${id}`]));
 }

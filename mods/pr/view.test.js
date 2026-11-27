@@ -1,8 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { byName, parsePin, prRef, shortSha } from "./github.js";
 import { summarize } from "./model.js";
-import { FILES_SHOWN, aboutLine, ago, blockerWords, currentStep, detailOf, failureLines, headlineOf, liveShown, moveSelection, paneRows, reviewerWords, rowIndex, rowUrl, rowsOf, saidLine, saidTone, selectedRow, stepLink, threadsLine } from "./view.js";
+import { aboutLine, ago, blockerWords, currentStep, detailOf, duration, failureLines, headlineOf, moveSelection, paneRows, reviewerWords, rowIndex, rowUrl, saidLine, saidTone, selectedRow, stepLink, threadsLine } from "./view.js";
 
 let ids = 0;
 const check = (bucket, extra = {}) => ({
@@ -16,48 +15,52 @@ const pr = (extra = {}) => ({
   headRef: "feat/x", baseRef: "main", mergeable: "MERGEABLE", mergeState: "CLEAN", review: null,
   additions: 1, deletions: 1, files: 1, ...extra,
 });
-const snapshot = (checks, extra = {}) => ({ pr: pr(extra.pr), checks, hidden: extra.hidden ?? 0, resetAt: null });
+const snapshot = (checks, extra = {}) => ({ pr: pr(extra.pr), checks, hidden: extra.hidden ?? 0, resetAt: null, method: "squash" });
 /** What is open in the pane, with the files folded as they start. */
 const shut = (extra = {}) => ({ folds: new Map(), aboutOpen: true, filesOpen: false, files: null, ...extra });
 const file = (path, extra = {}) => ({ path, previous: null, status: "modified", additions: 1, deletions: 0, patch: "@@ -1 +1,2 @@\n a\n+b", ...extra });
+/** The pane's rows for the checks: those under the description's row and the files' row. */
+const checkRows = (s, folds = new Map()) => paneRows(s, shut({ folds })).slice(2);
 const keys = (rows) => rows.map((r) => (r.kind === "group" ? `${r.group.key}${r.open ? "+" : "-"}` : r.kind === "hidden" ? `hidden ${r.count}` : r.check.bucket));
 
 test("failed, running and cancelled show their checks; passed folds when anything failed; skipped always folds", () => {
-  const rows = rowsOf(snapshot([check("fail"), check("pending"), check("cancel"), check("pass"), check("skipping")]), new Map());
+  const rows = checkRows(snapshot([check("fail"), check("pending"), check("cancel"), check("pass"), check("skipping")]));
   assert.deepEqual(keys(rows), ["fail+", "fail", "pending+", "pending", "cancel+", "cancel", "pass-", "skipping-"]);
 });
 
 test("passed shows its checks when it is all there is and there are 8 or fewer, and folds at 9", () => {
-  assert.deepEqual(keys(rowsOf(snapshot(Array.from({ length: 8 }, () => check("pass"))), new Map())), ["pass+", ...Array(8).fill("pass")]);
-  assert.deepEqual(keys(rowsOf(snapshot(Array.from({ length: 9 }, () => check("pass"))), new Map())), ["pass-"]);
+  assert.deepEqual(keys(checkRows(snapshot(Array.from({ length: 8 }, () => check("pass"))))), ["pass+", ...Array(8).fill("pass")]);
+  assert.deepEqual(keys(checkRows(snapshot(Array.from({ length: 9 }, () => check("pass"))))), ["pass-"]);
 });
 
 test("passed folds while checks run, even when cancelled ones are all that is wrong otherwise", () => {
-  assert.deepEqual(keys(rowsOf(snapshot([check("pending"), check("pass")]), new Map())), ["pending+", "pending", "pass-"]);
-  assert.deepEqual(keys(rowsOf(snapshot([check("cancel"), check("pass")]), new Map())), ["cancel+", "cancel", "pass+", "pass"]);
+  assert.deepEqual(keys(checkRows(snapshot([check("pending"), check("pass")]))), ["pending+", "pending", "pass-"]);
+  assert.deepEqual(keys(checkRows(snapshot([check("cancel"), check("pass")]))), ["cancel+", "cancel", "pass+", "pass"]);
 });
 
 test("a group the person opened or closed stays that way", () => {
-  const rows = rowsOf(snapshot([check("fail"), check("skipping")]), new Map([["fail", false], ["skipping", true]]));
+  const rows = checkRows(snapshot([check("fail"), check("skipping")]), new Map([["fail", false], ["skipping", true]]));
   assert.deepEqual(keys(rows), ["fail-", "skipping+", "skipping"]);
 });
 
 test("checks GitHub did not return get a row of their own at the end", () => {
-  assert.deepEqual(keys(rowsOf(snapshot([check("pass")], { hidden: 12 }), new Map())), ["pass+", "pass", "hidden 12"]);
+  assert.deepEqual(keys(checkRows(snapshot([check("pass")], { hidden: 12 }))), ["pass+", "pass", "hidden 12"]);
 });
 
 test("the selection starts on the first check, moves by rows and stops at either end", () => {
-  const rows = rowsOf(snapshot([check("fail"), check("fail"), check("pass")]), new Map());
-  assert.equal(selectedRow(rows, null), rows[1]);
-  assert.equal(moveSelection(rows, null, 1), rows[2].key);
-  assert.equal(moveSelection(rows, rows[2].key, 5), rows.at(-1).key);
-  assert.equal(moveSelection(rows, rows[1].key, -5), rows[0].key);
+  const failed = check("fail"), second = check("fail"), passed = check("pass");
+  const rows = paneRows(snapshot([failed, second, passed]), shut());
+  assert.deepEqual(rows.map((row) => row.key), ["about", "files", "group:fail", failed.id, second.id, "group:pass"]);
+  assert.equal(selectedRow(rows, null).key, failed.id);
+  assert.equal(moveSelection(rows, null, 1), second.id);
+  assert.equal(moveSelection(rows, second.id, 5), "group:pass");
+  assert.equal(moveSelection(rows, failed.id, -5), "about");
   assert.equal(moveSelection([], null, 1), null);
 });
 
 test("a selected check that folds away leaves the selection on its group's row", () => {
   const passed = check("pass");
-  const rows = rowsOf(snapshot([check("pending"), passed]), new Map());
+  const rows = paneRows(snapshot([check("pending"), passed]), shut());
   assert.equal(selectedRow(rows, passed.id).key, "group:pass");
 });
 
@@ -69,6 +72,22 @@ test("the headline names the stage first, and blockers leave out what it already
   assert.equal(headlineOf(review), "Open · Conflicts with the base branch");
   assert.deepEqual(blockerWords(review), ["Waiting for review"]);
   assert.equal(headlineOf(summarize(snapshot([], { pr: { state: "MERGED" } }))), "Merged");
+});
+
+test("synthetic: a draft whose checks pass reads Draft once, with nothing beside it", () => {
+  const draft = summarize(snapshot([check("pass")], { pr: { draft: true, mergeState: "DRAFT" } }));
+  assert.deepEqual([headlineOf(draft), blockerWords(draft)], ["Draft", []]);
+});
+
+test("synthetic: a headline about the checks is not said again beside it, as a blocker or as the note of a mergeable PR", () => {
+  const blocked = summarize(snapshot([check("fail", { required: true })], { pr: { mergeState: "BLOCKED", review: "REVIEW_REQUIRED" } }));
+  assert.deepEqual(blocked.merge.blockers.map((b) => b.kind), ["review-required", "checks-failing"]);
+  assert.deepEqual([headlineOf(blocked), blockerWords(blocked)], ["Open · 1 required check failing", ["Waiting for review"]]);
+  const running = summarize(snapshot([check("pending", { required: true })], { pr: { mergeState: "BLOCKED" } }));
+  assert.deepEqual([headlineOf(running), blockerWords(running)], ["Open · Required checks running, 0 of 1 done", []]);
+  const unstable = summarize(snapshot([check("fail"), check("pass")], { pr: { mergeState: "UNSTABLE" } }));
+  assert.equal(unstable.merge.note, "Some checks were not successful");
+  assert.deepEqual([headlineOf(unstable), blockerWords(unstable)], ["Open · 1 check failing", []]);
 });
 
 test("a mergeable PR whose optional checks failed says so beside Ready to merge", () => {
@@ -84,23 +103,27 @@ test("a running job shows the step it is on, counted among its steps", () => {
   assert.equal(currentStep(check("pending", { steps })), "2/3 Build");
   assert.equal(currentStep(check("pending")), null);
   assert.equal(currentStep(check("pass", { steps })), null);
+  assert.equal(currentStep(check("pending", { steps: steps.map((step) => (step.name === "Build" ? { ...step, state: "QUEUED" } : step)) })), "2/3 Build", "the first step not done, when none is in progress");
+  assert.equal(stepLink(check("pass", { link: null }), steps[1]), null);
   assert.equal(stepLink(check("pass", { link: "https://github.com/o/r/actions/runs/1/job/9" }), steps[1]), "https://github.com/o/r/actions/runs/1/job/9#step:2:1");
 });
 
+const trouble = (kind, text = "x", resetAt = null) => ({ failure: { kind, text }, streak: 1, resetAt });
+
 test("each failure says what went wrong and, where there is one, the fix", () => {
   const now = new Date(2026, 10, 26, 19, 0).getTime();
-  assert.equal(failureLines({ kind: "no-auth", text: "x" }, null, now).fix, "Run `gh auth login` in a terminal.");
-  assert.equal(failureLines({ kind: "rate-limited", text: "x" }, new Date(2026, 10, 26, 19, 42).getTime(), now).fix, "It resets at 19:42.");
-  assert.equal(failureLines({ kind: "rate-limited", text: "x" }, now - 1000, now).fix, "The pane tries again in 5 minutes.");
-  assert.equal(failureLines({ kind: "unknown", text: "HTTP 502: Bad Gateway\nmore" }, null, now).fix, "HTTP 502: Bad Gateway");
-  assert.equal(failureLines({ kind: "no-repo", text: "failed to run git: fatal: not a git repository" }, null, now).fix, null);
+  assert.equal(failureLines(trouble("no-auth"), now, null).fix, "Run `gh auth login` in a terminal.");
+  assert.equal(failureLines(trouble("rate-limited", "x", new Date(2026, 10, 26, 19, 42).getTime()), now, null).fix, "It resets at 19:42.");
+  assert.equal(failureLines(trouble("rate-limited", "x", now - 1000), now, null).fix, "The pane tries again in 5 minutes.");
+  assert.equal(failureLines(trouble("unknown", "HTTP 502: Bad Gateway\nmore"), now, null).fix, "HTTP 502: Bad Gateway");
+  assert.equal(failureLines(trouble("no-repo", "failed to run git: fatal: not a git repository"), now, null).fix, null);
 });
 
 test("a pinned pane names its pull request where a following pane says this branch", () => {
-  assert.equal(failureLines({ kind: "no-pr", text: "x" }, null, 0).headline, "No pull request for this branch");
-  assert.equal(failureLines({ kind: "no-pr", text: "x" }, null, 0, "cli/cli#999999").headline, "No pull request cli/cli#999999");
-  assert.equal(failureLines({ kind: "no-repo", text: "x" }, null, 0, "o/gone#1").headline, "gh cannot see the repository of o/gone#1");
-  assert.equal(failureLines({ kind: "offline", text: "x" }, null, 0, "cli/cli#1").headline, "Cannot reach GitHub");
+  assert.equal(failureLines(trouble("no-pr"), 0, null).headline, "No pull request for this branch");
+  assert.equal(failureLines(trouble("no-pr"), 0, "cli/cli#999999").headline, "No pull request cli/cli#999999");
+  assert.equal(failureLines(trouble("no-repo"), 0, "o/gone#1").headline, "gh cannot see the repository of o/gone#1");
+  assert.equal(failureLines(trouble("offline"), 0, "cli/cli#1").headline, "Cannot reach GitHub");
 });
 
 test("o opens the selected check's page, the pull request from its description, else the pull request's checks", () => {
@@ -130,10 +153,11 @@ test("a selected file is still the selection's place after the files fold: their
   assert.equal(moveSelection(folded, "file:a.ts", 1), folded[2].key);
 });
 
-test(`past ${FILES_SHOWN} files the list stops and one row counts the rest`, () => {
-  const list = Array.from({ length: FILES_SHOWN + 2 }, (_, i) => file(`f${i}.ts`));
+test("past 300 files the list stops and one row counts the rest", () => {
+  const list = Array.from({ length: 302 }, (_, i) => file(`f${i}.ts`));
   const rows = paneRows(snapshot([]), shut({ filesOpen: true, files: list }));
-  assert.equal(rows.filter((row) => row.kind === "file").length, FILES_SHOWN);
+  assert.deepEqual(rows.filter((row) => row.kind === "file").map((row) => row.file), list.slice(0, 300));
+  assert.equal(paneRows(snapshot([]), shut({ filesOpen: true, files: list.slice(0, 300) })).some((row) => row.kind === "more-files"), false);
   assert.deepEqual(rows.at(-1), { kind: "more-files", key: "more-files", count: 2 });
   assert.equal(rowUrl(rows.at(-1), snapshot([])), "https://github.com/o/r/pull/146/files");
 });
@@ -141,12 +165,8 @@ test(`past ${FILES_SHOWN} files the list stops and one row counts the rest`, () 
 test("ages read in the largest whole unit", () => {
   const now = 10_000_000;
   assert.deepEqual([0, 40, 180, 7200, 3 * 86400].map((s) => ago(now - s * 1000, now)), ["just now", "40 s ago", "3 min ago", "2 h ago", "3 days ago"]);
-});
-
-test("what is shown is live only as GitHub's latest answer: not a saved copy, not after a failed poll", () => {
-  assert.equal(liveShown({ source: "live" }, null), true);
-  assert.equal(liveShown({ source: "cache" }, null), false);
-  assert.equal(liveShown({ source: "live" }, { failure: { kind: "offline", text: "x" }, streak: 1 }), false);
+  assert.deepEqual([9, 10, 59, 60, 3599, 3600, 86399, 86400].map((s) => ago(now - s * 1000, now)),
+    ["just now", "10 s ago", "59 s ago", "1 min ago", "59 min ago", "1 h ago", "23 h ago", "1 day ago"]);
 });
 
 test("the description is the pane's first row, and the selection still starts on the first check", () => {
@@ -191,6 +211,8 @@ test("reviewers who answered come first with where they stand, then those still 
     { text: "ada approved", tone: "done" }, { text: "bo asked for changes", tone: "blocked" },
     { text: "cy is asked to review", tone: "idle" }, { text: "A reviewer GitHub does not name is asked to review", tone: "idle" },
   ]);
+  assert.deepEqual(reviewerWords(about({ reviews: [{ who: "di", state: "DISMISSED" }, { who: "ed", state: "PENDING" }, { who: "fay", state: "COMMENTED" }] })),
+    [{ text: "di review dismissed", tone: "idle" }, { text: "ed is reviewing", tone: "working" }, { text: "fay commented", tone: "idle" }]);
   assert.deepEqual(reviewerWords(about()), []);
 });
 
@@ -207,9 +229,9 @@ test("synthetic: the detail drawn is the selected file or check, once opened in 
 });
 
 test("synthetic: a failure's headline says whether it names the pinned pull request itself", () => {
-  assert.equal(failureLines({ kind: "no-pr", text: "x" }, null, 0, "cli/cli#9").named, true);
-  assert.equal(failureLines({ kind: "offline", text: "x" }, null, 0, "cli/cli#9").named, false);
-  assert.equal(failureLines({ kind: "no-pr", text: "x" }, null, 0).named, false);
+  assert.equal(failureLines(trouble("no-pr"), 0, "cli/cli#9").named, true);
+  assert.equal(failureLines(trouble("offline"), 0, "cli/cli#9").named, false);
+  assert.equal(failureLines(trouble("no-pr"), 0, null).named, false);
 });
 
 test("synthetic: what was said has its review's tone, and a plain comment none", () => {
@@ -217,10 +239,29 @@ test("synthetic: what was said has its review's tone, and a plain comment none",
   assert.deepEqual([null, "APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"].map((state) => saidTone(said(state))), ["idle", "done", "blocked", "idle", "idle"]);
 });
 
-test("synthetic: a pull request, a commit and an author are written one way", () => {
-  assert.equal(prRef(parsePin("cli/cli#15081")), "cli/cli#15081");
-  assert.equal(prRef(parsePin("https://ghe.example.com/team/app/pull/7/files")), "team/app#7");
-  assert.equal(shortSha("94e5a03ca65b12a53bc7850e4d1835a7743f60f0"), "94e5a03");
-  assert.equal(byName(null), "A deleted account");
-  assert.equal(byName("ada"), "ada");
+
+test("each kind of failure has its headline, its tone and what to do about it", () => {
+  const lines = Object.fromEntries(["no-gh", "no-auth", "no-repo", "no-pr", "offline", "rate-limited", "unknown"].map((kind) => {
+    const { headline, tone, fix } = failureLines(trouble(kind, "boom\nmore"), 0, null);
+    return [kind, [headline, tone, fix]];
+  }));
+  assert.deepEqual(lines, {
+    "no-gh": ["GitHub CLI (gh) not found", "blocked", "Install the GitHub CLI, then run `gh auth login` in a terminal."],
+    "no-auth": ["gh is not logged in", "blocked", "Run `gh auth login` in a terminal."],
+    "no-repo": ["Not a GitHub repository", "idle", null],
+    "no-pr": ["No pull request for this branch", "idle", null],
+    offline: ["Cannot reach GitHub", "idle", "The pane tries again by itself."],
+    "rate-limited": ["GitHub rate limit reached", "idle", "The pane tries again in 5 minutes."],
+    unknown: ["gh failed", "blocked", "boom"],
+  });
+  assert.equal(failureLines(trouble("unknown", "  \n"), 0, null).fix, null);
+});
+
+test("a check says how long it ran, or has run so far", () => {
+  assert.equal(duration("2026-11-26T18:00:00Z", "2026-11-26T18:00:45Z", 0), "45s");
+  assert.equal(duration("2026-11-26T18:00:00Z", "2026-11-26T18:03:29Z", 0), "3m 29s");
+  assert.equal(duration("2026-11-26T18:00:00Z", "2026-11-26T19:05:10Z", 0), "1h 5m");
+  assert.equal(duration("2026-11-26T18:00:00Z", null, Date.parse("2026-11-26T18:02:00Z")), "2m 0s");
+  assert.equal(duration(null, null, 0), "");
+  assert.deepEqual(["18:00:59Z", "18:01:00Z", "18:59:59Z", "19:00:00Z"].map((end) => duration("2026-11-26T18:00:00Z", `2026-11-26T${end}`, 0)), ["59s", "1m 0s", "59m 59s", "1h 0m"]);
 });

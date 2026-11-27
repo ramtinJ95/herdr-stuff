@@ -2,10 +2,13 @@ import { div } from "gpui-kit";
 import { Input, Scrollbar, TextView, h_flex, h_resizable, resizable_panel, v_flex, v_virtual_list } from "gpui-base";
 import { settings, theme } from "herdr";
 import { CUT_COLUMNS, ROLES, isLine, rowNumber, rowSpans } from "./diff.js";
-import { duration, hasSteps, plural, summarize } from "./model.js";
-import { byName, firstLine, prRef, shortSha } from "./github.js";
-import { KINDS, askWords, countByPath, stretch, threadStretch, threadWhere, threadsByPath, toSend } from "./review.js";
-import { aboutLine, ago, blockerWords, currentStep, detailOf, failureLines, headlineOf, liveShown, reviewerWords, saidLine, saidTone, selectedRow, stepLink, threadsLine } from "./view.js";
+import { hasSteps, staleCheckout, summarize } from "./model.js";
+import { byName, prRef, shortSha } from "./github.js";
+import { KINDS, askWords, countByPath, threadState, threadStretch, threadWhere, threadsByPath, toSend } from "./review.js";
+import { stretch } from "./reading.js";
+import { liveShown } from "./state.js";
+import { firstLine, plural } from "./text.js";
+import { aboutLine, ago, blockerWords, currentStep, duration, failureLines, headlineOf, reviewerWords, saidLine, saidTone, selectedRow, stepLink, threadsLine } from "./view.js";
 
 export const WIDE_PX = 720;
 /** The narrowest the list is dragged to beside a diff or a check's steps, in px. */
@@ -37,49 +40,48 @@ function notice(t, tone, look, headline, lines) {
 
 const where = (t, place) => [`${place.pin ?? `${place.branch ?? "no branch"} · ${folder(place.cwd)}`}${place.machine === null ? "" : ` on ${place.machine}`}`, t.dim];
 
-function failed(app, t, failure, now, place) {
-  const { headline, tone, fix, named } = failureLines(failure, app.resetAt, now, place.pin);
+function failed(t, trouble, now, place) {
+  const { headline, tone, fix, named } = failureLines(trouble, now, place.pin);
   return notice(t, tone, "still", headline, [fix === null ? null : [fix, t.muted], named ? null : where(t, place)]);
 }
 
 /** What stands in the pane while there is no pull request to draw. */
 const PLACEHOLDERS = {
-  idle: (_app, t) => notice(t, "idle", "still", "No terminal in this tab to follow", []),
-  locating: (_app, t, s) => notice(t, "idle", "pulse", "Finding this branch's pull request", [where(t, s.place)]),
-  failed: (app, t, s, now) => failed(app, t, s.trouble.failure, now, s.place),
-  "no-pr": (_app, t, s) => notice(t, "idle", "still", `No pull request for ${s.place.branch ?? "this branch"} yet`, [["It shows here once one is opened.", t.muted], where(t, s.place)]),
-  showing: (app, t, s, now) => (s.trouble !== null ? failed(app, t, s.trouble.failure, now, s.place)
+  idle: (t) => notice(t, "idle", "still", "No terminal in this tab to follow", []),
+  locating: (t, s) => notice(t, "idle", "pulse", "Finding this branch's pull request", [where(t, s.place)]),
+  failed: (t, s, now) => failed(t, s.trouble, now, s.place),
+  "no-pr": (t, s) => notice(t, "idle", "still", `No pull request for ${s.place.branch ?? "this branch"} yet`, [["It shows here once one is opened.", t.muted], where(t, s.place)]),
+  showing: (t, s, now) => (s.trouble !== null ? failed(t, s.trouble, now, s.place)
     : notice(t, "idle", "pulse", `Reading #${s.target.number}`, [where(t, s.place)])),
-  replay: (_app, t, s) => (s.trouble !== null ? notice(t, "blocked", "still", "The replay frame did not load", [[s.trouble.failure.text, t.muted], [s.file, t.dim]])
+  replay: (t, s) => (s.trouble !== null ? notice(t, "blocked", "still", "The replay frame did not load", [[s.trouble.failure.text, t.muted], [s.file, t.dim]])
     : notice(t, "idle", "pulse", "Reading the replay frame", [[s.file, t.dim]])),
-  "bad-pin": (_app, t, s) => notice(t, "blocked", "still", "This pane was given a pull request it cannot read", [[s.text, t.muted]]),
+  "bad-pin": (t, s) => notice(t, "blocked", "still", "This pane was given a pull request it cannot read", [[s.text, t.muted]]),
 };
 
 export function drawPane(app, now) {
   const t = theme();
-  const s = app.state;
+  const s = app.state();
+  const scene = app.scene();
   return v_flex().id("pr").track_focus(app.handle).size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
     .on_size_change((size, cx) => app.resized(size, cx))
     .on_key_down((e, cx) => app.key(e, cx))
-    .on_modifiers_changed((e) => {
-      app.shift = e.modifiers.shift;
-    })
+    .on_modifiers_changed((e) => app.modifiers(e))
     .on_mouse_down("left", (_e, cx) => app.pressed(cx))
-    .child("shown" in s && s.shown !== null ? snapshotView(app, t, s, now) : PLACEHOLDERS[s.phase](app, t, s, now));
+    .child(scene !== null ? snapshotView(app, t, scene, now) : PLACEHOLDERS[s.phase](t, s, now));
 }
 
 const CHECK_ROWS = ["group", "check", "hidden"];
 
+/** @param {import("./state.js").Scene} s */
 function snapshotView(app, t, s, now) {
   const { snapshot } = s.shown;
   const clock = s.shown.source === "replay" ? s.shown.fetchedAt : now;
-  const sum = summarize(snapshot, { localHead: s.phase === "showing" ? s.localHead : null });
+  const sum = summarize(snapshot);
   const rows = app.rows();
-  const selected = selectedRow(rows, app.selected);
-  const detail = detailOf(rows, app.selected, app.wide, app.expanded);
+  const selected = selectedRow(rows, app.look.selected);
+  const detail = app.detail();
   const file = detail?.kind === "file" ? detail.file : null, check = detail?.kind === "check" ? detail.check : null;
   const pane = v_flex().size_full().min_h(0).child(header(app, t, s, sum, now));
-  // A diff wants the pane's width: in a narrow pane it stands in place of the list until Esc.
   if (!app.wide && file !== null) return pane.child(diffPane(app, t, file, now));
   const noted = { mine: countByPath(app.notes().annotations), theirs: threadsByPath(app.threads()) };
   // Each row is one child of the list, whatever opens under it, so a row's place in `rows` is the child scroll_to_item reveals.
@@ -110,19 +112,15 @@ function snapshotView(app, t, s, now) {
 function header(app, t, s, sum, now) {
   const { snapshot, fetchedAt, source } = s.shown;
   const pr = snapshot.pr;
-  const trouble = s.phase === "locating" ? null : s.trouble;
+  const { trouble, pin } = s;
   const live = liveShown(s.shown, trouble);
   const look = !live && source !== "replay" ? "faded" : sum.ci.kind === "pending" ? "pulse" : "still";
   const age = source === "replay" ? `replay, recorded ${ago(fetchedAt, now)}` : live ? null : `as of ${ago(fetchedAt, now)}`;
   const blockers = blockerWords(sum);
-  const pin = s.phase === "showing" ? s.place.pin : null;
   const repo = pin === null ? "" : `${s.target.owner}/${s.target.name}, pinned · `;
   const fine = (text) => div().pl(17).truncate().text_size(11.5).text_color(t.dim).child(text);
-  // A floating window is dragged by its header: a press anywhere else in it is the pane's own.
   return v_flex().id("header").flex_none().px(14).pt(10).pb(10).gap(3).border_b_1().border_color(t.border)
-    .when(app.overlay !== null, (el) => el.on_mouse_down("left", () => {
-      app.grip = true;
-    }))
+    .when(app.overlay !== null, (el) => el.on_mouse_down("left", () => app.gripped()))
     .child(h_flex().gap(8).items_center()
       .child(dot(t, sum.tone, look))
       .child(h_flex().id("title").flex_1().min_w(0).gap(6).cursor_pointer().on_click(open(pr.url))
@@ -134,9 +132,9 @@ function header(app, t, s, sum, now) {
     .child(div().pl(17).text_size(13).text_color(live || source === "replay" ? t.foreground : t.muted).child(headlineOf(sum)))
     .when(blockers.length > 0, (el) => el.child(line(blockers.join(" · "), t.muted).pl(17)))
     .child(fine(`${repo}${pr.headRef} → ${pr.baseRef} · ${shortSha(pr.head)} · +${pr.additions} −${pr.deletions} · ${plural(pr.files, "file")}`))
-    .when(sum.stale, (el) => el.child(line(`Your checkout is at ${shortSha(s.localHead)}, not ${shortSha(pr.head)}, the commit CI ran.`, t.muted).pl(17)))
+    .when(staleCheckout(pr, s.localHead), (el) => el.child(line(`Your checkout is at ${shortSha(s.localHead)}, not ${shortSha(pr.head)}, the commit CI ran.`, t.muted).pl(17)))
     .when(trouble !== null, (el) => {
-      const { headline, fix } = failureLines(trouble.failure, app.resetAt, now, pin);
+      const { headline, fix } = failureLines(trouble, now, pin);
       return el.child(line(fix === null ? headline : `${headline}. ${fix}`, t.muted).pl(17));
     })
     .children(mergeRow(app, t, now));
@@ -213,8 +211,8 @@ const fileCounts = (t, file) => [
 ];
 
 function filesNote(t, s) {
-  const error = s.phase === "showing" ? s.filesError : null;
-  return line(s.phase === "replay" ? "A replay frame has no files." : error !== null ? `The files did not load: ${error}` : "Reading the files…", t.dim).pl(32).pr(14).pb(8);
+  const error = s.errors.files;
+  return line(s.shown.source === "replay" ? "A replay frame has no files." : error !== null ? `The files did not load: ${error}` : "Reading the files…", t.dim).pl(32).pr(14).pb(8);
 }
 
 /** How strongly a row is tinted, as the alpha of its colour: an added or removed line, and the part of it that differs. */
@@ -268,18 +266,18 @@ function diffPane(app, t, file, now) {
     return pane.child(line(file.additions + file.deletions > 0 ? "GitHub gives no diff for this file: it is too large. Press o to open the pull request's files."
       : "No text diff: a binary file, or one that only moved.", t.muted).p(12));
   }
-  const { digits, why } = app.diff(file);
+  const { digits, why } = app.diffAt(file.path);
   const { items, sizes, columns } = app.listing(file);
   const inks = roleInks(t);
+  const activeId = reading?.activeId ?? null;
+  const sending = app.sending();
   const picked = reading === null ? null : stretch(reading.cursor, reading.anchor);
   const noted = why === null ? pane : pane.child(line(why, t.dim).flex_none().px(12).py(4).truncate().border_b_1().border_color(t.border));
   const { size, char, gutter, left } = measures(digits);
   const height = lineHeight();
   const id = `diff:${file.path}`;
-  // What is noted under a line, in one row: whose it is, what there is to say of it, then its words, which are cut at
-  // the row's end; the bar under the diff has them whole.
   const noteRow = (id, name, ink, meta, body, bodyInk) => h_flex().w_full().h(height).flex_none().pl(left).pr(SCROLLBAR_PX).gap(8).items_center()
-    .bg(id === app.activeId ? t.selected : t.raised)
+    .bg(id === activeId ? t.selected : t.raised)
     .child(div().flex_none().text_color(ink).child(name))
     .children(meta.filter((x) => x !== null).map((words) => div().flex_none().text_color(t.dim).child(words)))
     .child(div().flex_1().min_w(0).truncate().text_color(bodyInk).child(body));
@@ -287,13 +285,12 @@ function diffPane(app, t, file, now) {
     if (item.type === "annotation") {
       const { annotation: one, moved } = item;
       return noteRow(one.id, `${KINDS[one.kind].glyph} ${KINDS[one.kind].label}`, t[KIND_INK[one.kind]],
-        [moved ? `${one.target.where} at an earlier commit` : null, askWords(one, app.sending)], one.body, t.foreground);
+        [moved ? `${one.target.where} at an earlier commit` : null, askWords(one, sending)], one.body, t.foreground);
     }
     if (item.type === "thread") {
       const { thread, placed } = item;
       const count = thread.comments.length + thread.more;
-      const meta = [placed ? null : threadWhere(thread, false), thread.resolved ? "resolved" : null, count > 1 ? `${count - 1} more` : null, app.sending.has(thread.id) ? "writing…" : null];
-      // A resolved thread is settled: it stands back from the ones still open.
+      const meta = [placed ? null : threadWhere(thread, false), thread.resolved ? "resolved" : null, count > 1 ? `${count - 1} more` : null, sending.has(thread.id) ? "writing…" : null];
       return noteRow(thread.id, `${THREAD_GLYPH} ${who(thread.comments[0])}`, thread.resolved ? t.dim : t[THREAD_INK], meta,
         firstLine(thread.comments[0]?.body ?? ""), thread.resolved ? t.muted : t.foreground);
     }
@@ -308,7 +305,6 @@ function diffPane(app, t, file, now) {
       return h_flex().w_full().h(height).flex_none().items_center().bg(on ? t.selected : t.raised).text_color(at ? t.foreground : t.dim)
         .child(strip).child(marked).child(div().flex_1().min_w(0).pl(6).pr(SCROLLBAR_PX).truncate().child(row.text));
     }
-    // A line longer than the diff is wide is folded at the edge, as a terminal folds it; its number stands by its first line.
     const lines = rowSpans(row, columns);
     const tint = (row.kind === "add" ? t.ansi2 : t.ansi1) + DIFF_INK.changed;
     return h_flex().w_full().h(lines.length * height).flex_none().items_start()
@@ -336,46 +332,48 @@ function diffPane(app, t, file, now) {
  */
 function reviewBar(app, t, reading, now) {
   const { annotations } = app.notes();
-  const going = SENDING.find(([what]) => app.sending.has(what));
-  if (reading === null && app.draft === null && app.activeId === null && app.notice === null && going === undefined) return [];
+  const { notice } = app.look;
+  const sending = app.sending();
+  const going = SENDING.find(([what]) => sending.has(what));
+  if (reading === null && notice === null && going === undefined) return [];
+  const mode = reading?.mode ?? { is: "browse" };
   const bar = (...children) => [v_flex().flex_none().px(12).py(7).gap(5).border_t_1().border_color(t.border).children(children)];
   const tagged = (ink, name, words) => h_flex().gap(8).items_center()
     .child(div().flex_none().text_size(12).font_semibold().text_color(ink).child(name))
     .child(line(words.filter((x) => x !== null).join(" · "), t.dim).min_w(0).truncate());
   const tag = (kind, target, extra) => tagged(t[KIND_INK[kind]], `${KINDS[kind].glyph} ${KINDS[kind].label}`, [target === null ? "the whole pull request" : target.where, extra]);
   const threadTag = (thread, extra) => tagged(thread.resolved ? t.dim : t[THREAD_INK], `${THREAD_GLYPH} Thread`,
-    [threadWhere(thread, threadStretch(app.patched(thread.path), thread) !== null), thread.resolved ? "resolved" : null, thread.outdated ? "outdated" : null, extra]);
-  const field = () => div().id("annotation").h(30).px(8).flex().items_center().rounded(6).border_1().border_color(app.typing ? t.accent : t.input).cursor_text()
+    [threadWhere(thread, threadStretch(app.patched(thread.path), thread) !== null), ...threadState(thread), extra]);
+  const field = () => div().id("annotation").h(30).px(8).flex().items_center().rounded(6).border_1().border_color(app.fieldFocused ? t.accent : t.input).cursor_text()
     .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
     .child(Input.new(app.input).h_full().text_size(12.5).text_color(t.foreground));
   const to = app.agent();
   const { name } = to;
-  if (app.draft !== null && "reply" in app.draft) {
-    const { reply, failed } = app.draft;
-    return bar(threadTag(reply, failed === null ? "Enter posts the reply on GitHub, Esc gives it up" : `GitHub did not take it: ${failed} Enter tries again, Esc gives it up`), field());
+  if (mode.is === "reply") {
+    const { thread, failed } = mode;
+    return bar(threadTag(thread, failed === null ? "Enter posts the reply on GitHub, Esc gives it up" : `GitHub did not take it: ${failed} Enter tries again, Esc gives it up`), field());
   }
-  if (app.draft !== null) {
-    const { kind, target } = app.draft;
+  if (mode.is === "draft") {
+    const { kind, target } = mode.draft;
     const enter = kind !== "question" ? "Enter keeps it, Esc gives it up" : to.terminal === null ? to.why : `Enter asks ${to.name}, Esc gives it up`;
     return bar(tag(kind, target, enter), field());
   }
   const count = toSend(annotations).length;
-  const asked = app.confirming;
-  if (asked !== null) {
-    const there = prRef(app.state.target);
+  if (mode.is === "asking") {
+    const asked = mode.asking;
+    const there = prRef(app.showing().target);
     const words = asked.what === "send" ? `Send ${plural(count, "annotation")} to ${name}? Enter sends them, Esc keeps them here.`
       : asked.what === "forward" ? `Send this thread to ${name}? Enter sends it, Esc does not.`
       : asked.event === "APPROVE" ? `Approve ${there} on GitHub${count === 0 ? "" : `, with ${plural(count, "annotation")}`}? Enter approves it, Esc does not.`
       : `Post ${plural(count, "annotation")} on GitHub as a review of ${there}? Enter posts them, Esc keeps them here.`;
     return bar(line(words, t.foreground));
   }
-  if (going !== undefined) return bar(line(going[1], t.muted));
-  if (app.notice !== null) return bar(line(app.notice, t.muted));
+  if (going !== undefined) return bar(line(app.closing ? `${going[1]} It closes once that has gone.` : going[1], t.muted));
+  if (notice !== null) return bar(line(notice, t.muted));
   const { annotation: one, thread } = app.active();
   if (thread !== null) {
     const keys = [thread.canReply ? "r to reply" : null, thread.resolved ? (thread.canUnresolve ? "z to open it again" : null) : thread.canResolve ? "z to resolve it" : null, `f to send it to ${name}`];
-    // A thread can be long: it scrolls in the bar, which leaves the diff most of the pane.
-    return bar(threadTag(thread, app.sending.has(thread.id) ? "writing…" : null),
+    return bar(threadTag(thread, sending.has(thread.id) ? "writing…" : null),
       v_flex().id(`thread:${thread.id}`).max_h(220).overflow_y_scrollbar().gap(6)
         .children(thread.comments.map((said) => v_flex().gap(1)
           .child(line(`${who(said)} · ${ago(Date.parse(said.at), now)}`, t.dim))
@@ -384,7 +382,7 @@ function reviewBar(app, t, reading, now) {
       line(keys.filter((x) => x !== null).join(" · "), t.dim));
   }
   if (one !== null) {
-    return bar(tag(one.kind, one.target, askWords(one, app.sending)),
+    return bar(tag(one.kind, one.target, askWords(one, sending)),
       div().text_size(12.5).text_color(t.foreground).child(one.body),
       line("r to change it · x to delete it", t.dim));
   }
@@ -397,9 +395,9 @@ const SENDING = [["send", "Sending the review…"], ["post", "Posting the review
 
 function aboutBlock(t, s, now) {
   const say = (text) => line(text, t.dim).pl(32).pr(14).pb(8);
-  if (s.phase === "replay") return say("A replay frame has no description.");
+  if (s.shown.source === "replay") return say("A replay frame has no description.");
   const { about } = s.shown;
-  const error = s.phase === "showing" ? s.aboutError : null;
+  const error = s.errors.about;
   if (about === null) return say(error !== null ? `The description did not load: ${error}` : "Reading the description…");
   const reviewers = reviewerWords(about);
   return v_flex().pl(32).pr(14).pb(10).gap(4)
@@ -448,7 +446,7 @@ function stepsOf(t, c, s, now) {
   const say = (text) => [line(text, t.muted).pl(22).pt(8)];
   if (c.kind === "status") return [...say("A commit status, not a job: it has no steps."), ...c.description ? say(c.description) : []];
   if (!hasSteps(c)) return say(`A check from ${c.app ?? "another app"}: GitHub keeps no steps for it.`);
-  if (c.steps === null) return say(s.phase === "showing" && s.stepsError !== null ? `Its steps did not load: ${s.stepsError}` : s.phase === "replay" ? "The frame has no steps for it." : "Reading its steps…");
+  if (c.steps === null) return say(s.errors.steps !== null ? `Its steps did not load: ${s.errors.steps}` : s.shown.source === "replay" ? "The frame has no steps for it." : "Reading its steps…");
   if (c.steps.length === 0) return say("No steps reported yet.");
   return [v_flex().pt(8).children(c.steps.map((step) => {
     const href = stepLink(c, step);

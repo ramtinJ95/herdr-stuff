@@ -1,33 +1,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { GhError, parseFiles } from "./github.js";
-import { CUT_COLUMNS, coloursOf, cutSpans, diffOf, helperInput, isLine, lastLine, noColours, paintRows, patchRows, plainNote, rowLines, rowNumber, rowSpans, untabSpans, wrapSpans } from "./diff.js";
+import { parseFiles } from "./github.js";
+import { diffOf, isLine, rowLines, rowNumber, rowSpans } from "./diff.js";
 import { readJson } from "./recorded.js";
 
 /** What `gh api repos/ramtinJ95/first-game/pulls/146/files --paginate --slurp` printed. */
 const filesAnswer = () => readJson("files-first-game-146.json");
 const count = (rows, kind) => rows.filter((row) => row.kind === kind).length;
 
-test("a recorded files answer reads as each file's path, status, counts and diff", () => {
-  const files = parseFiles(filesAnswer());
-  assert.deepEqual(files.map(({ patch, ...rest }) => rest), [
-    { path: "scripts/cautious-rome.test.ts", previous: null, status: "modified", additions: 178, deletions: 3 },
-    { path: "scripts/cautious-rome.ts", previous: null, status: "modified", additions: 105, deletions: 3 },
-    { path: "scripts/sim/slide.ts", previous: null, status: "modified", additions: 5, deletions: 1 },
-  ]);
-  assert.ok(files.every((file) => file.patch.startsWith("@@ ")));
-});
-
 test("the rows of each recorded diff add up to the additions and deletions GitHub counts for the file", () => {
   for (const file of parseFiles(filesAnswer())) {
-    const rows = patchRows(file.patch);
+    const rows = diffOf(file.patch).rows;
     assert.deepEqual([count(rows, "add"), count(rows, "del")], [file.additions, file.deletions], file.path);
   }
 });
 
 test("each recorded hunk numbers its lines from its header, and holds as many old and new lines as the header says", () => {
   for (const file of parseFiles(filesAnswer())) {
-    const rows = patchRows(file.patch);
+    const rows = diffOf(file.patch).rows;
     const starts = rows.flatMap((row, i) => (row.kind === "hunk" ? [i] : []));
     assert.ok(starts.length > 0 && starts[0] === 0, file.path);
     starts.forEach((start, n) => {
@@ -42,7 +32,7 @@ test("each recorded hunk numbers its lines from its header, and holds as many ol
 });
 
 test("synthetic: a removed line shows where it was, an added one where it is, and git's own remark is a note", () => {
-  const rows = patchRows("@@ -7,2 +7,2 @@ function f() {\n same\n-old\n\\ No newline at end of file\n+new");
+  const rows = diffOf("@@ -7,2 +7,2 @@ function f() {\n same\n-old\n\\ No newline at end of file\n+new").rows;
   assert.deepEqual(rows, [
     { kind: "hunk", text: "@@ -7,2 +7,2 @@ function f() {" },
     { kind: "same", old: 7, new: 7, text: "same" },
@@ -54,32 +44,13 @@ test("synthetic: a removed line shows where it was, an added one where it is, an
 });
 
 test("synthetic: a tab is padded to the next 4-column stop, since text draws it as nothing", () => {
-  assert.deepEqual(patchRows("@@ -1 +1 @@\n+\tif (x) {\n+ab\tc").slice(1).map((row) => row.text), ["    if (x) {", "ab  c"]);
+  assert.deepEqual(diffOf("@@ -1 +1 @@\n+\tif (x) {\n+ab\tc").rows.slice(1).map((row) => row.text), ["    if (x) {", "ab  c"]);
 });
 
 test("synthetic: a diff is laid out for its largest line number", () => {
   const { rows, digits } = diffOf("@@ -98,2 +98,3 @@\n a\n+a longer line\n b");
   assert.deepEqual([rows.length, digits], [4, 3]);
-});
-
-test("synthetic: a file GitHub gives no diff for has a null patch; a rename keeps its old path", () => {
-  const raw = filesAnswer();
-  delete raw[0][0].patch;
-  Object.assign(raw[0][1], { status: "renamed", previous_filename: "scripts/old.ts" });
-  const files = parseFiles(raw);
-  assert.equal(files[0].patch, null);
-  assert.deepEqual([files[1].status, files[1].previous], ["renamed", "scripts/old.ts"]);
-});
-
-test("synthetic: a file status this pane has not seen is refused, not drawn as something else", () => {
-  const raw = filesAnswer();
-  raw[0][0].status = "teleported";
-  assert.throws(() => parseFiles(raw), GhError);
-});
-
-test("synthetic: pages of files read as one list, in order", () => {
-  const [page] = filesAnswer();
-  assert.deepEqual(parseFiles([page.slice(0, 2), page.slice(2)]).map((file) => file.path), parseFiles([page]).map((file) => file.path));
+  assert.equal(diffOf("@@ -9,2 +9 @@\n a\n-b").digits, 2, "a removed line's number counts");
 });
 
 // The helper's lines for `@@ -7,2 +7,2 @@`, ` same`, `-old`, `+new`: [kind, number, [[role, text, changed]]].
@@ -101,7 +72,6 @@ test("synthetic: one line off, in count, kind, number or text, leaves the whole 
     lines().map((line, i) => (i === 0 ? [line[0], line[1], [[0, "other", 0]]] : line)),
   ];
   for (const wrong of off) {
-    assert.equal(paintRows(patchRows(PATCH), wrong), null);
     const { rows, coloured } = diffOf(PATCH, wrong);
     assert.deepEqual([coloured, rows.some((row) => row.spans !== undefined)], [false, false]);
   }
@@ -109,80 +79,59 @@ test("synthetic: one line off, in count, kind, number or text, leaves the whole 
 
 test("synthetic: a line the helper cut short is the same line, and what it left out is drawn plain", () => {
   const cut = lines().map((line, i) => (i === 0 ? [line[0], line[1], [[4, "sa", 0]]] : line));
-  assert.deepEqual(paintRows(patchRows(PATCH), cut)[1].spans, [[4, "sa", 0], [0, "me", 0]]);
+  const { rows, coloured } = diffOf(PATCH, cut);
+  assert.deepEqual([coloured, rows[1].spans], [true, [[4, "sa", 0], [0, "me", 0]]]);
 });
 
 test("synthetic: tabs are padded along the whole line, across its spans, as in the plain text", () => {
-  const spans = [[4, "\tif", 0], [0, " (x)\t", 0], [1, "// why", 0]];
-  assert.deepEqual(untabSpans(spans), [[4, "    if", 0], [0, " (x)  ", 0], [1, "// why", 0]]);
-  const patch = "@@ -1 +1 @@\n+\tif (x)\t// why";
-  assert.equal(diffOf(patch, [["add", 1, spans]]).coloured, true);
+  const { rows, coloured } = diffOf("@@ -1 +1 @@\n+\tif (x)\t// why", [["add", 1, [[4, "\tif", 0], [0, " (x)\t", 0], [1, "// why", 0]]]]);
+  assert.deepEqual([coloured, rows[1].text, rows[1].spans], [true, "    if (x)  // why", [[4, "    if", 0], [0, " (x)  ", 0], [1, "// why", 0]]]);
 });
 
-test("synthetic: spans are cut at the column a plain line is cut at", () => {
-  assert.deepEqual(cutSpans([[0, "abc", 0], [1, "def", 1], [2, "ghi", 0]], 5), [[0, "abc", 0], [1, "de", 1]]);
-  assert.deepEqual(cutSpans([[0, "abc", 0]], 3), [[0, "abc", 0]]);
-});
+/** A line of these spans as it is drawn in a pane `columns` wide. */
+const drawn = (spans, columns) => rowSpans({ kind: "add", old: null, new: 1, text: spans.map(([, part]) => part).join(""), spans }, columns);
 
-test("synthetic: only files with a diff are sent to the helper, with what it reads of them", () => {
-  const files = [{ path: "a.js", previous: null, status: "modified", additions: 1, deletions: 0, patch: "@@" }, { path: "b.png", previous: null, status: "added", additions: 0, deletions: 0, patch: null }];
-  assert.deepEqual(helperInput(files), { files: [{ path: "a.js", previous: null, status: "modified", patch: "@@" }] });
-});
-
-test("synthetic: a run of the helper reads as each file's lines, or as the reason there are none", () => {
-  const ok = coloursOf({ code: 0, stdout: JSON.stringify({ files: [{ path: "a.js", lines: lines() }, { path: "b.js", lines: null, error: "odd" }] }), stderr: "" });
-  assert.deepEqual([ok.note, ok.byPath.get("a.js"), ok.byPath.get("b.js")], [null, lines(), "odd"]);
-  const missing = coloursOf({ code: 1, stdout: "", stderr: "node:internal\nError [ERR_MODULE_NOT_FOUND]: Cannot find package '@pierre/diffs'\n" });
-  assert.equal(missing.note, "No syntax colours: run `npm install` in mods/pr/pierre.");
-  assert.equal(coloursOf({ code: 1, stdout: "", stderr: "a\nTypeError: boom\n" }).note, "No syntax colours: the helper failed. TypeError: boom");
-  assert.match(coloursOf({ code: 0, stdout: "not json", stderr: "" }).note, /^No syntax colours: the helper's answer did not read\. /);
-  assert.equal(missing.byPath.size, 0);
-});
-
-test("synthetic: a plain diff says why, and says nothing while the helper has not answered or once colours are on", () => {
-  const colours = coloursOf({ code: 0, stdout: JSON.stringify({ files: [{ path: "a.js", lines: lines() }, { path: "b.js", lines: null, error: "odd" }] }), stderr: "" });
-  assert.equal(plainNote(undefined, "a.js", false), null);
-  assert.equal(plainNote(colours, "a.js", true), null);
-  assert.equal(plainNote(colours, "a.js", false), "No syntax colours for this file: the helper read other lines than these.");
-  assert.equal(plainNote(colours, "b.js", false), "No syntax colours for this file: odd");
-  assert.equal(plainNote(colours, "c.js", false), "No syntax colours for this file: the helper did not answer for it.");
-  assert.equal(plainNote(noColours("No syntax colours: node did not run. x"), "a.js", false), "No syntax colours: node did not run. x");
+test("synthetic: a coloured line is cut at column 400, as a plain one is, and what is left of a span keeps its colour and mark", () => {
+  const start = "a".repeat(398);
+  assert.deepEqual(drawn([[0, start, 0], [1, "bcdef", 1], [2, "ghi", 0]], 400), [[[0, start, 0], [1, "bc", 1]]]);
+  assert.deepEqual(drawn([[0, start, 0], [1, "bc", 1]], 400), [[[0, start, 0], [1, "bc", 1]]]);
+  assert.deepEqual(drawn([[0, start, 0], [1, "bc", 1], [2, "ghi", 0]], 400), [[[0, start, 0], [1, "bc", 1]]], "a span that starts at the cut is left out");
 });
 
 test("synthetic: a long line folds at the pane's edge, wherever that falls, and each part keeps its colour and mark", () => {
-  assert.deepEqual(wrapSpans([[4, "abc", 0], [0, "defgh", 1]], 4), [[[4, "abc", 0], [0, "d", 1]], [[0, "efgh", 1]]]);
-  assert.deepEqual(wrapSpans([[0, "abcdefghij", 0]], 4), [[[0, "abcd", 0]], [[0, "efgh", 0]], [[0, "ij", 0]]]);
+  assert.deepEqual(drawn([[4, "abc", 0], [0, "defgh", 1]], 4), [[[4, "abc", 0], [0, "d", 1]], [[0, "efgh", 1]]]);
+  assert.deepEqual(drawn([[0, "abcdefghij", 0]], 4), [[[0, "abcd", 0]], [[0, "efgh", 0]], [[0, "ij", 0]]]);
 });
 
 test("synthetic: a line with no text is still one line, and a line that ends at the edge has no empty line after it", () => {
-  assert.deepEqual(wrapSpans([], 4), [[]]);
-  assert.deepEqual(wrapSpans([[0, "", 0]], 4), [[]]);
-  assert.deepEqual(wrapSpans([[0, "abcd", 0], [1, "efgh", 0]], 4), [[[0, "abcd", 0]], [[1, "efgh", 0]]]);
+  assert.deepEqual(rowSpans({ kind: "same", old: 1, new: 1, text: "" }, 10), [[[0, "", 0]]]);
+  assert.deepEqual(drawn([[0, "abcd", 0], [1, "efgh", 0]], 4), [[[0, "abcd", 0]], [[1, "efgh", 0]]]);
+  assert.deepEqual(drawn([[0, "abcd", 0], [1, "", 0], [1, "efgh", 0]], 4), [[[0, "abcd", 0]], [[1, "efgh", 0]]], "a span with no text draws nothing");
 });
 
 test("every recorded row takes as many lines as its cut text folds into, and a hunk header or a note takes one", () => {
-  const rows = filesAnswer().flat().filter((file) => file.patch).flatMap((file) => patchRows(file.patch));
+  const rows = filesAnswer().flat().filter((file) => file.patch).flatMap((file) => diffOf(file.patch).rows);
   assert.ok(rows.some((row) => row.text.length > 40), "the recording has lines that fold");
-  for (const columns of [20, 40, 97, CUT_COLUMNS]) {
+  for (const columns of [20, 40, 97, 400]) {
     for (const row of rows) {
       const folded = isLine(row) ? rowSpans(row, columns).length : 1;
       assert.equal(rowLines(row, columns), folded, `${row.kind} row of ${row.text.length} characters at ${columns}`);
     }
   }
-  assert.equal(rowLines({ kind: "add", old: null, new: 1, text: "x".repeat(CUT_COLUMNS * 3) }, 100), CUT_COLUMNS / 100);
+  assert.equal(rowLines({ kind: "add", old: null, new: 1, text: "x".repeat(1200) }, 100), 4, "a line is cut at column 400");
 });
 
 test("synthetic: a row's text is drawn as its own spans when it fits, and cut then folded when it does not", () => {
   const spans = [[4, "const", 0], [0, " a = 1;", 0]];
   const row = { kind: "add", old: null, new: 1, text: "const a = 1;", spans };
-  assert.equal(rowSpans(row, 80)[0], spans);
-  assert.deepEqual(rowSpans(row, 5), wrapSpans(spans, 5));
-  const long = { kind: "same", old: 1, new: 1, text: "x".repeat(CUT_COLUMNS + 50) };
-  assert.deepEqual(rowSpans(long, 100), wrapSpans(cutSpans([[0, long.text, 0]], CUT_COLUMNS), 100));
-  assert.deepEqual(rowSpans({ kind: "same", old: 1, new: 1, text: "" }, 10), [[[0, "", 0]]]);
+  assert.deepEqual(rowSpans(row, 80), [[[4, "const", 0], [0, " a = 1;", 0]]]);
+  assert.deepEqual(rowSpans(row, 12), [[[4, "const", 0], [0, " a = 1;", 0]]]);
+  assert.deepEqual(rowSpans(row, 5), [[[4, "const", 0]], [[0, " a = ", 0]], [[0, "1;", 0]]]);
+  const long = { kind: "same", old: 1, new: 1, text: "x".repeat(450) };
+  assert.deepEqual(rowSpans(long, 100), Array(4).fill([[0, "x".repeat(100), 0]]));
+  assert.deepEqual(rowSpans(long, 500), [[[0, "x".repeat(400), 0]]]);
 });
 
-test("synthetic: a line of the file is any row but a hunk's header or a note; stderr's last line says what went wrong", () => {
-  assert.deepEqual(patchRows("@@ -1 +1,2 @@\n a\n+b\n\\ No newline at end of file").map(isLine), [false, true, true, false]);
-  assert.equal(lastLine("warning\nError: boom\n"), "Error: boom");
+test("synthetic: a line of the file is any row but a hunk's header or a note", () => {
+  assert.deepEqual(diffOf("@@ -1 +1,2 @@\n a\n+b\n\\ No newline at end of file").rows.map(isLine), [false, true, true, false]);
 });

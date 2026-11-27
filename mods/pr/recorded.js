@@ -5,10 +5,20 @@ import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { frameAnswer, parsePr } from "./github.js";
 
-export const fixtures = new URL("./fixtures/", import.meta.url).pathname;
+const fixtures = new URL("./fixtures/", import.meta.url).pathname;
 
 /** One of the JSON files in `fixtures/`, read anew at each call. */
 export const readJson = (name) => JSON.parse(readFileSync(join(fixtures, name), "utf8"));
+
+/** What gh printed and how it exited when it failed, each sample with the kind of failure it is. */
+export const failures = readJson("failures.json");
+
+/** The one of those samples of `kind` whose `how` matches. */
+export function sample(kind, how) {
+  const found = failures.samples.find((s) => s.kind === kind && how.test(s.how));
+  assert.ok(found, `failures.json has a ${kind} sample matching ${how}`);
+  return found;
+}
 
 export function recordings(dir) {
   return readdirSync(dir).filter((f) => /\.jsonl(\.gz)?$/.test(f)).sort().map((f) => {
@@ -33,11 +43,12 @@ export function frame(prefix, n = 1) {
   return structuredClone(found[0].frames[n - 1]);
 }
 
-/** That frame as the answer gh printed, after `edit(pr, commit)` changed it. */
+/** That frame as the answer gh printed, after `edit(pr, commit, repository)` changed it. */
 export function answerOf(prefix, n = 1, edit = () => {}) {
-  const f = frame(prefix, n);
-  edit(f.pr, f.pr.commits.nodes[0].commit);
-  return frameAnswer(f);
+  const answer = frameAnswer(frame(prefix, n));
+  const { repository } = answer.data;
+  edit(repository.pullRequest, repository.pullRequest.commits.nodes[0].commit, repository);
+  return answer;
 }
 
 export const snapshotOf = (prefix, n = 1, edit = () => {}) => parsePr(answerOf(prefix, n, edit));
