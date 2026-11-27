@@ -7,6 +7,9 @@ import { frameAnswer, parsePr } from "./github.js";
 
 export const fixtures = new URL("./fixtures/", import.meta.url).pathname;
 
+/** One of the JSON files in `fixtures/`, read anew at each call. */
+export const readJson = (name) => JSON.parse(readFileSync(join(fixtures, name), "utf8"));
+
 export function recordings(dir) {
   return readdirSync(dir).filter((f) => /\.jsonl(\.gz)?$/.test(f)).sort().map((f) => {
     const bytes = readFileSync(join(dir, f));

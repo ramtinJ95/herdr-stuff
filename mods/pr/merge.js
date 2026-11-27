@@ -1,5 +1,5 @@
 import { prArgs } from "./query.js";
-import { firstLine, parsePr, readAnswer } from "./github.js";
+import { firstLine, parsePr, readAnswer, shortSha } from "./github.js";
 import { offersMerge, summarize } from "./model.js";
 
 /** @typedef {import("./github.js").Target} Target */
@@ -32,7 +32,7 @@ export const MERGE_ARMED_MS = 10_000;
 
 const VERBS = { merge: "merge", squash: "squash-merge", rebase: "rebase-merge" };
 
-export const armedLine = (method, head, base) => `Press again to ${VERBS[method]} ${head.slice(0, 7)} into ${base}`;
+export const armedLine = (method, head, base) => `Press again to ${VERBS[method]} ${shortSha(head)} into ${base}`;
 
 /**
  * The one reading of Merge that the row is drawn from and a press goes by.
@@ -85,5 +85,5 @@ export async function confirmMerge(gh, target, method, head) {
   if (!offersMerge(summarize(snapshot)) || snapshot.pr.head !== head) return refused("Not merged: the pull request changed after the first press.");
   const merged = await gh(mergeArgv(target, method, head));
   if (merged.failure !== null) return refused(`Merge failed: ${firstLine(merged.failure.text)}`);
-  return { step: "done", ok: true, text: `Merged ${head.slice(0, 7)} into ${snapshot.pr.baseRef} (${method}).` };
+  return { step: "done", ok: true, text: `Merged ${shortSha(head)} into ${snapshot.pr.baseRef} (${method}).` };
 }

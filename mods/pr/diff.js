@@ -18,6 +18,7 @@ const HUNK = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
 /** Text draws a tab as nothing: each is padded to the next 4-column stop, counted along the whole line. @param {Span[]} spans @returns {Span[]} */
 export function untabSpans(spans) {
+  if (!spans.some(([, text]) => text.includes("\t"))) return spans;
   let column = 0;
   return spans.map(([role, text, changed]) => {
     let out = "";
@@ -54,8 +55,11 @@ export function patchRows(patch) {
   });
 }
 
+/** Whether a row is a line of the file, on one side or both: not a hunk's header, not a note of git's. @param {DiffRow} row */
+export const isLine = (row) => row.kind !== "hunk" && row.kind !== "note";
+
 /** The number a row shows in the gutter: where the line is now, or where it was when it is gone. */
-export const rowNumber = (row) => (row.kind === "hunk" || row.kind === "note" ? null : row.new ?? row.old);
+export const rowNumber = (row) => (isLine(row) ? row.new ?? row.old : null);
 
 /**
  * The rows with the helper's colours on them, or null when its lines are not these rows' lines: another count, kind,
@@ -69,7 +73,7 @@ export function paintRows(rows, lines) {
   let at = 0;
   const painted = [];
   for (const row of rows) {
-    if (row.kind === "hunk" || row.kind === "note") {
+    if (!isLine(row)) {
       painted.push(row);
       continue;
     }
@@ -86,8 +90,8 @@ export function paintRows(rows, lines) {
 }
 
 /**
- * A patch ready to draw: its rows, coloured when `lines` are given and are its lines, the widest in characters, and the
- * digits its largest line number takes. `coloured` says whether the colours went on.
+ * A patch ready to draw: its rows, coloured when `lines` are given and are its lines, and the digits its largest line
+ * number takes. `coloured` says whether the colours went on.
  * @param {string} patch
  * @param {Line[] | null} [lines]
  */
@@ -98,7 +102,6 @@ export function diffOf(patch, lines = null) {
   return {
     rows,
     coloured: painted !== null,
-    columns: rows.reduce((widest, row) => Math.max(widest, row.text.length), 0),
     digits: String(rows.reduce((largest, row) => Math.max(largest, rowNumber(row) ?? 0), 0)).length,
   };
 }
@@ -145,7 +148,19 @@ export function wrapSpans(spans, columns) {
 
 /** How many lines of `columns` characters a row is drawn in: as many as `wrapSpans` folds its cut text into. @param {DiffRow} row */
 export const rowLines = (row, columns) =>
-  (row.kind === "hunk" || row.kind === "note" ? 1 : Math.max(1, Math.ceil(Math.min(row.text.length, CUT_COLUMNS) / columns)));
+  (isLine(row) ? Math.max(1, Math.ceil(Math.min(row.text.length, CUT_COLUMNS) / columns)) : 1);
+
+/**
+ * A row's text as the lines it is drawn in: cut at CUT_COLUMNS, then folded at `columns`. A line that fits is its spans as they are.
+ * @param {Extract<DiffRow, { text: string, old: number | null }>} row @returns {Span[][]}
+ */
+export function rowSpans(row, columns) {
+  const spans = row.spans ?? [[0, row.text, 0]];
+  return row.text.length <= Math.min(columns, CUT_COLUMNS) ? [spans] : wrapSpans(cutSpans(spans, CUT_COLUMNS), columns);
+}
+
+/** The last line of what a program wrote to stderr: where it says what went wrong. */
+export const lastLine = (text) => text.trim().split("\n").at(-1);
 
 /**
  * What the helper said of a pull request's files: each file's lines by path, or for a file it could not read the reason,
@@ -168,7 +183,7 @@ export const helperInput = (files) =>
 export function coloursOf({ code, stdout, stderr }) {
   if (code !== 0) {
     if (stderr.includes("ERR_MODULE_NOT_FOUND")) return noColours("No syntax colours: run `npm install` in mods/pr/pierre.");
-    return noColours(`No syntax colours: the helper failed. ${stderr.trim().split("\n").at(-1)}`);
+    return noColours(`No syntax colours: the helper failed. ${lastLine(stderr)}`);
   }
   try {
     const { files } = JSON.parse(stdout);

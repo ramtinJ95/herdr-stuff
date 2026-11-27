@@ -3,6 +3,8 @@
  * their words are those of the review-pane mod for Claude Code, which keeps them on a response; here they are on a diff.
  * GitHub's own review threads stand among the same lines, and the notes can be posted there as a review.
  */
+import { isLine, lastLine } from "./diff.js";
+import { byName, shortSha } from "./github.js";
 import { plural } from "./model.js";
 
 /** @typedef {import("./diff.js").DiffRow} DiffRow */
@@ -46,6 +48,13 @@ const MOVES = { down: () => 1, up: () => -1, "half-down": (page) => page, "half-
 
 export const isMove = (action) => action in MOVES;
 
+/**
+ * Whether an action is given with its key in the pane and never by a command from outside it: an approval, and the
+ * Enter that confirms one. Like Merge, it is somebody looking at the pane who gives it.
+ * @param {string} action @param {{ what: string, event?: string } | null} asking what Enter has been asked to confirm
+ */
+export const keyOnly = (action, asking) => action === "approve" || (action === "confirm" && asking?.what === "post" && asking.event === "APPROVE");
+
 /** The row a move leaves the cursor on. `page` is half of what is on screen. */
 export const moveCursor = (action, cursor, count, page) => Math.max(0, Math.min(count - 1, cursor + MOVES[action](Math.max(1, page))));
 
@@ -65,10 +74,12 @@ export function whereOf(rows, start, end) {
 }
 
 const PREFIX = { add: "+", del: "-", same: " ", hunk: "", note: "\\ " };
+/** A stretch of rows as a diff writes them. @param {DiffRow[]} rows */
+const quoted = (rows, start, end) => rows.slice(start, end + 1).map((row) => PREFIX[row.kind] + row.text);
 
 /** @param {DiffRow[]} rows @returns {Target} */
 export function targetOf(path, head, rows, start, end) {
-  return { path, head, start, end, where: whereOf(rows, start, end), quote: rows.slice(start, end + 1).map((row) => PREFIX[row.kind] + row.text) };
+  return { path, head, start, end, where: whereOf(rows, start, end), quote: quoted(rows, start, end) };
 }
 
 /**
@@ -89,13 +100,16 @@ export const dropAnnotation = (review, id) => ({ ...review, annotations: review.
 /** @param {Review} review @param {Annotation["ask"]} ask @returns {Review} */
 export const markAsked = (review, id, ask) => ({ ...review, annotations: review.annotations.map((one) => (one.id === id ? { ...one, ask } : one)) });
 
+/** Where a file stands among `paths`: the whole pull request (a null path) before them all, a file not among them after. */
+const fileRank = (paths, path) => (path === null ? -1 : paths.includes(path) ? paths.indexOf(path) : paths.length);
+
 /**
  * The whole pull request's first, then by file in the order of `paths`, then by place. The sort is stable: ties keep
  * the order they were made in.
  * @param {Annotation[]} annotations @param {string[]} paths @returns {Annotation[]}
  */
 export function sortAnnotations(annotations, paths) {
-  const file = (one) => (one.target === null ? -1 : paths.includes(one.target.path) ? paths.indexOf(one.target.path) : paths.length);
+  const file = (one) => fileRank(paths, one.target?.path ?? null);
   return [...annotations].sort((left, right) => file(left) - file(right)
     || (left.target === null || right.target === null ? 0 : left.target.start - right.target.start || left.target.end - right.target.end));
 }
@@ -107,7 +121,7 @@ export function stepAnnotation(ordered, activeId, delta) {
   return ordered[(base + delta + ordered.length) % ordered.length];
 }
 
-const rowAt = (rows, side, line) => rows.findIndex((row) => row.kind !== "hunk" && row.kind !== "note" && row[side === "LEFT" ? "old" : "new"] === line);
+const rowAt = (rows, side, line) => rows.findIndex((row) => isLine(row) && row[side === "LEFT" ? "old" : "new"] === line);
 
 /**
  * The rows of a file's diff a GitHub thread is on, the last being the line it stands under; null when the diff does not
@@ -166,7 +180,7 @@ export function annotatedRows(rows, annotations, path, head, threads = []) {
 }
 
 /** The annotation a key acts on: the one stepped to, else the first on the cursor's row. @param {Annotation[]} annotations @returns {Annotation | null} */
-export function activeAnnotation(annotations, activeId, path, head, cursor) {
+function activeAnnotation(annotations, activeId, path, head, cursor) {
   return annotations.find((one) => one.id === activeId)
     ?? sortAnnotations(annotations.filter((one) => one.target?.path === path && one.target.head === head && one.target.start <= cursor && one.target.end >= cursor), [path])[0]
     ?? null;
@@ -198,7 +212,7 @@ export function activeNote(annotations, threads, activeId, path, head, rows, cur
  * @returns {{ id: string, path: string | null, row: number }[]}
  */
 export function stops(annotations, threads, paths, head, rowsOf) {
-  const file = (path) => (path === null ? -1 : paths.includes(path) ? paths.indexOf(path) : paths.length);
+  const file = (path) => fileRank(paths, path);
   const noted = sortAnnotations(annotations, paths).map(({ id, target }) => ({ id, path: target?.path ?? null, row: target === null || target.head !== head ? 0 : target.start }));
   const said = threads.map((thread) => ({ id: thread.id, path: thread.path, row: threadStretch(rowsOf(thread.path), thread)?.end ?? 0 }));
   return [...noted, ...said].sort((left, right) => file(left.path) - file(right.path) || left.row - right.row);
@@ -239,12 +253,11 @@ function fence(lines) {
 }
 
 const named = ({ ref, title, url }) => `pull request ${ref}, "${title}" (${url})`;
-const short = (sha) => sha.slice(0, 7);
 
 /** Where an annotation points, for the agent. Lines of an earlier commit are said to be. @param {Target | null} target */
 function place(target, head) {
   if (target === null) return "The pull request as a whole";
-  return `\`${target.path}\` ${target.where}${target.head === head ? "" : ` (as of commit ${short(target.head)})`}`;
+  return `\`${target.path}\` ${target.where}${target.head === head ? "" : ` (as of commit ${shortSha(target.head)})`}`;
 }
 
 /**
@@ -255,7 +268,7 @@ function place(target, head) {
 export function formatReview(subject, annotations, paths) {
   const ordered = sortAnnotations(toSend(annotations), paths);
   if (ordered.length === 0) return "";
-  const output = [`I reviewed ${named(subject)} at commit ${short(subject.head)}. Please address these annotations.`, ""];
+  const output = [`I reviewed ${named(subject)} at commit ${shortSha(subject.head)}. Please address these annotations.`, ""];
   ordered.forEach((one, index) => {
     const marker = `${index + 1}. `;
     const indent = (line) => (line === "" ? "" : " ".repeat(marker.length) + line);
@@ -270,7 +283,7 @@ export function formatReview(subject, annotations, paths) {
 /** A question as the agent is sent it, at once: where it points, the lines and the question. @param {Subject} subject @param {Annotation} question */
 export function formatQuestion(subject, question) {
   return [
-    `I am reading ${named(subject)} at commit ${short(subject.head)} in a pane beside this terminal and have a question.`,
+    `I am reading ${named(subject)} at commit ${shortSha(subject.head)} in a pane beside this terminal and have a question.`,
     "",
     `Location: ${place(question.target, subject.head)}`,
     ...question.target === null ? [] : ["", "The lines the question is about:", ...fence(question.target.quote)],
@@ -278,8 +291,6 @@ export function formatQuestion(subject, question) {
     `Question: ${question.body}`,
   ].join("\n");
 }
-
-const quoted = (rows, start, end) => rows.slice(start, end + 1).map((row) => PREFIX[row.kind] + row.text);
 
 /**
  * One of GitHub's threads as the agent is sent it: where it is, the lines it is on when the diff has them, and all that
@@ -290,13 +301,13 @@ export function formatThread(subject, thread, rows) {
   const on = threadStretch(rows, thread);
   const state = [thread.resolved ? "resolved" : null, thread.outdated ? "outdated" : null].filter((word) => word !== null);
   return [
-    `I am reading ${named(subject)} at commit ${short(subject.head)} in a pane beside this terminal. Please address this review thread on it.`,
+    `I am reading ${named(subject)} at commit ${shortSha(subject.head)} in a pane beside this terminal. Please address this review thread on it.`,
     "",
     `Location: \`${thread.path}\` ${threadWhere(thread, on !== null)}${state.length === 0 ? "" : ` (${state.join(", ")})`}`,
     ...on === null ? [] : ["", "The lines it is on:", ...fence(quoted(rows, on.start, on.end))],
     "",
     `The thread${thread.comments.length === 0 ? "" : ` (${thread.comments[0].url})`}:`,
-    ...thread.comments.flatMap((said) => ["", `${said.who ?? "A deleted account"} wrote:`, ...said.body.split("\n").map((text) => (text === "" ? ">" : `> ${text}`))]),
+    ...thread.comments.flatMap((said) => ["", `${byName(said.who)} wrote:`, ...said.body.split("\n").map((text) => (text === "" ? ">" : `> ${text}`))]),
     ...thread.more === 0 ? [] : ["", `${plural(thread.more, "more comment")} on GitHub.`],
   ].join("\n");
 }
@@ -308,19 +319,19 @@ export function formatThread(subject, thread, rows) {
  * @param {DiffRow[]} rows @returns {Omit<LineComment, "path" | "body"> | null}
  */
 export function githubLines(rows, start, end) {
-  const isLine = (row) => row !== undefined && row.kind !== "hunk" && row.kind !== "note";
+  const line = (row) => row !== undefined && isLine(row);
   let last = end;
-  while (last >= start && !isLine(rows[last])) last--;
+  while (last >= start && !line(rows[last])) last--;
   if (last < start) return null;
   let first = last;
-  while (first > start && isLine(rows[first - 1])) first--;
+  while (first > start && line(rows[first - 1])) first--;
   const side = rows[last].kind === "del" ? "LEFT" : "RIGHT";
   // A stretch that ends on a removed line is on the old side throughout: an added line before it has no place there.
   if (side === "LEFT") while (rows[first].old === null) first++;
-  const line = side === "LEFT" ? rows[last].old : rows[last].new;
-  if (first === last) return { line, side };
+  const ends = side === "LEFT" ? rows[last].old : rows[last].new;
+  if (first === last) return { line: ends, side };
   const startSide = side === "LEFT" || rows[first].kind === "del" ? "LEFT" : "RIGHT";
-  return { startLine: startSide === "LEFT" ? rows[first].old : rows[first].new, startSide, line, side };
+  return { startLine: startSide === "LEFT" ? rows[first].old : rows[first].new, startSide, line: ends, side };
 }
 
 /**
@@ -362,12 +373,12 @@ export function postBlock({ event, count, live, busy, mine, state }) {
  * The terminal the tab's agent runs in, as `hc send` names it, with a name for people; or why there is none to send to.
  * The pane's own terminal comes first when it runs an agent. A shell is never sent to: it would run the words.
  * @param {import("herdr").PaneInfo[]} mine the tab's terminal panes
- * @returns {{ terminal: string, name: string } | { terminal: null, why: string }}
+ * @returns {{ terminal: string, name: string } | { terminal: null, name: "the agent", why: string }}
  */
 export function agentOf(mine, follow, machine) {
   const agents = mine.filter((p) => p.terminal !== null && (p.program?.agent === true || p.status !== null));
   const pane = agents.find((p) => p.pane === follow) ?? agents.find((p) => p.focused) ?? agents[0];
-  if (pane === undefined) return { terminal: null, why: "No agent in this tab to send it to." };
+  if (pane === undefined) return { terminal: null, name: "the agent", why: "No agent in this tab to send it to." };
   return { terminal: machine === null ? pane.terminal : `${machine}/${pane.terminal}`, name: pane.name ?? pane.program?.name ?? pane.terminal };
 }
 
@@ -380,6 +391,6 @@ export function sendResult({ code, stderr }) {
   try {
     return { failed: String(JSON.parse(stderr).error.message) };
   } catch {
-    return { failed: stderr.trim().split("\n").at(-1) || `hc send exited with ${code}` };
+    return { failed: lastLine(stderr) || `hc send exited with ${code}` };
   }
 }

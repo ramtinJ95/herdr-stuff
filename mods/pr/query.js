@@ -9,7 +9,7 @@ const CONTEXTS = `
     ... on CheckRun {
       id name status conclusion startedAt completedAt detailsUrl
       isRequired(pullRequestNumber: $number)
-      checkSuite { app { slug } workflowRun { databaseId event workflow { name } } }
+      checkSuite { app { slug } workflowRun { event workflow { name } } }
       steps(first: 60) @include(if: $steps) ${STEP_FIELDS}
     }
     ... on StatusContext {
@@ -21,7 +21,7 @@ const CONTEXTS = `
 /** The poll. The repository's merge methods ride along, so Merge needs no call of its own. */
 export const PR_QUERY = `
 query($owner: String!, $name: String!, $number: Int!, $steps: Boolean!) {
-  rateLimit { cost remaining resetAt }
+  rateLimit { resetAt }
   repository(owner: $owner, name: $name) {
     viewerDefaultMergeMethod mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed
     pullRequest(number: $number) {
@@ -37,7 +37,6 @@ query($owner: String!, $name: String!, $number: Int!, $steps: Boolean!) {
 
 export const STEPS_QUERY = `
 query($ids: [ID!]!) {
-  rateLimit { cost remaining }
   nodes(ids: $ids) { ... on CheckRun { id steps(first: 60) ${STEP_FIELDS} } }
 }`;
 
@@ -49,14 +48,13 @@ const SAID = "author { login } body createdAt url";
  */
 export const ABOUT_QUERY = `
 query($owner: String!, $name: String!, $number: Int!) {
-  rateLimit { cost remaining }
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       id body createdAt updatedAt viewerDidAuthor
       author { login }
       labels(first: 20) { nodes { name } }
       latestOpinionatedReviews(first: 20) { nodes { state author { login } } }
-      reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on Actor { login } ... on Team { name } } } }
+      reviewRequests(first: 20) { nodes { requestedReviewer { ... on Actor { login } ... on Team { name } } } }
       comments(last: 30) { totalCount nodes { ${SAID} } }
       reviews(last: 30) { totalCount nodes { state submittedAt ${SAID} } }
       reviewThreads(first: 100) {
@@ -73,14 +71,14 @@ query($owner: String!, $name: String!, $number: Int!) {
 }`;
 
 /** One more comment at the end of a thread. */
-export const REPLY_MUTATION = `
+const REPLY_MUTATION = `
 mutation($thread: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $thread, body: $body }) { comment { url } }
 }`;
 
 const RESOLVED = "thread { id isResolved }";
-export const RESOLVE_MUTATION = `mutation($thread: ID!) { resolveReviewThread(input: { threadId: $thread }) { ${RESOLVED} } }`;
-export const UNRESOLVE_MUTATION = `mutation($thread: ID!) { unresolveReviewThread(input: { threadId: $thread }) { ${RESOLVED} } }`;
+const RESOLVE_MUTATION = `mutation($thread: ID!) { resolveReviewThread(input: { threadId: $thread }) { ${RESOLVED} } }`;
+const UNRESOLVE_MUTATION = `mutation($thread: ID!) { unresolveReviewThread(input: { threadId: $thread }) { ${RESOLVED} } }`;
 
 /** The `gh api graphql` arguments for a query; `fields` are gh's `-f`/`-F` pairs. */
 export const graphqlArgs = (host, query, fields) => ["api", "graphql", "--hostname", host, "-f", `query=${query}`, ...fields];

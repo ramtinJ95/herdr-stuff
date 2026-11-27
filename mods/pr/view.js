@@ -1,4 +1,4 @@
-import { firstLine } from "./github.js";
+import { byName, firstLine } from "./github.js";
 import { POLL, describeFailure, groups, plural } from "./model.js";
 
 /** @typedef {import("./github.js").Snapshot} Snapshot */
@@ -61,7 +61,8 @@ export function rowUrl(row, snapshot) {
   return `${snapshot.pr.url}/${FILE_ROWS.includes(row.kind) ? "files" : "checks"}`;
 }
 
-function indexOf(rows, key) {
+/** Where the selected row is: the one with `key`, else the folded row that holds it, else the first check. */
+export function rowIndex(rows, key) {
   const own = rows.findIndex((r) => r.key === key);
   if (own >= 0) return own;
   const folded = rows.findIndex((r) => (r.kind === "group" && r.group.checks.some((c) => c.id === key)) || (r.kind === "files" && String(key).startsWith("file:")));
@@ -70,11 +71,21 @@ function indexOf(rows, key) {
 }
 
 /** @returns {Row | null} */
-export const selectedRow = (rows, key) => rows[indexOf(rows, key)] ?? null;
+export const selectedRow = (rows, key) => rows[rowIndex(rows, key)] ?? null;
 
 export function moveSelection(rows, key, by) {
   if (rows.length === 0) return null;
-  return rows[Math.min(rows.length - 1, Math.max(0, indexOf(rows, key) + by))].key;
+  return rows[Math.min(rows.length - 1, Math.max(0, rowIndex(rows, key) + by))].key;
+}
+
+/**
+ * The selected file or check whose diff or steps are drawn: beside the list in a wide pane, in place of it or under its
+ * row once opened in a narrow one. Null for any other row, and for one not opened in a narrow pane.
+ * @param {Row[]} rows @returns {Extract<Row, { kind: "file" | "check" }> | null}
+ */
+export function detailOf(rows, key, wide, expanded) {
+  const row = selectedRow(rows, key);
+  return row !== null && (row.kind === "file" || row.kind === "check") && (wide || expanded) ? row : null;
 }
 
 const STAGE_WORDS = { open: "Open", draft: "Draft" };
@@ -115,14 +126,18 @@ const FIXES = {
 /** What a pinned pane says in place of the lines about "this branch". */
 const PINNED = { "no-pr": (pin) => `No pull request ${pin}`, "no-repo": (pin) => `gh cannot see the repository of ${pin}` };
 
-/** `pin` names the pull request a pinned pane was given, null for a pane that follows its tab. */
+/**
+ * `pin` names the pull request a pinned pane was given, null for a pane that follows its tab. `named` says the headline
+ * names that pull request itself, so nothing else need say where the pane looked.
+ */
 export function failureLines(failure, resetAt, now, pin = null) {
-  const { tone } = describeFailure(failure);
-  const headline = pin !== null && PINNED[failure.kind] !== undefined ? PINNED[failure.kind](pin) : describeFailure(failure).headline;
+  const { tone, headline: plain } = describeFailure(failure);
+  const named = pin !== null && PINNED[failure.kind] !== undefined;
+  const headline = named ? PINNED[failure.kind](pin) : plain;
   if (failure.kind === "rate-limited") {
-    return { headline, tone, fix: resetAt !== null && resetAt > now ? `It resets at ${clock(resetAt)}.` : `The pane tries again in ${POLL["rate-limited"] / 60_000} minutes.` };
+    return { headline, tone, named, fix: resetAt !== null && resetAt > now ? `It resets at ${clock(resetAt)}.` : `The pane tries again in ${POLL["rate-limited"] / 60_000} minutes.` };
   }
-  return { headline, tone, fix: FIXES[failure.kind] ?? (failure.kind === "unknown" ? firstLine(failure.text).trim() || null : null) };
+  return { headline, tone, named, fix: FIXES[failure.kind] ?? (failure.kind === "unknown" ? firstLine(failure.text).trim() || null : null) };
 }
 
 export function ago(ms, now) {
@@ -139,7 +154,7 @@ export const liveShown = (shown, trouble) => shown.source === "live" && trouble 
 
 /** Who opened the PR and when, and how much is on it. @param {About} about */
 export const aboutLine = (about, now) =>
-  [`${about.author ?? "A deleted account"} opened it ${ago(Date.parse(about.createdAt), now)}`, plural(about.commits, "commit"), ...about.comments > 0 ? [plural(about.comments, "comment")] : []].join(" · ");
+  [`${byName(about.author)} opened it ${ago(Date.parse(about.createdAt), now)}`, plural(about.commits, "commit"), ...about.comments > 0 ? [plural(about.comments, "comment")] : []].join(" · ");
 
 const REVIEW_WORDS = {
   APPROVED: ["approved", "done"], CHANGES_REQUESTED: ["asked for changes", "blocked"], DISMISSED: ["review dismissed", "idle"],
@@ -147,7 +162,10 @@ const REVIEW_WORDS = {
 };
 
 /** Who said something under the description, as what, and when. @param {import("./github.js").Said} said */
-export const saidLine = (said, now) => `${said.who ?? "A deleted account"} ${said.state === null ? "commented" : REVIEW_WORDS[said.state][0]} ${ago(Date.parse(said.at), now)}`;
+export const saidLine = (said, now) => `${byName(said.who)} ${said.state === null ? "commented" : REVIEW_WORDS[said.state][0]} ${ago(Date.parse(said.at), now)}`;
+
+/** The tone of what was said: a review's verdict, none for a plain comment. @param {import("./github.js").Said} said */
+export const saidTone = (said) => (said.state === null ? "idle" : REVIEW_WORDS[said.state][1]);
 
 /** The threads on the diff in a line, or null when there are none. @param {About} about */
 export function threadsLine(about) {

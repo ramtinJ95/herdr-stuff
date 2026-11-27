@@ -273,7 +273,7 @@ const targetOf = (m) => ({ host: m[1], owner: m[2], name: m[3], number: Number(m
 
 /** gh's own lookup of the pull request for the branch checked out in the folder it runs in. */
 export function prLookupArgs() {
-  return ["pr", "view", "--json", "number,url,state,headRefName,headRefOid"];
+  return ["pr", "view", "--json", "url"];
 }
 
 /** Where the pull request lives, from `prLookupArgs()`'s stdout. */
@@ -302,6 +302,15 @@ export function parsePin(text) {
   if (url === null) throw new GhError("unknown", `${JSON.stringify(text)} is not owner/name#number or a pull request's URL`);
   return targetOf(url);
 }
+
+/** A pull request as people write it, and as `parsePin` reads it on github.com. @param {Target} target */
+export const prRef = (target) => `${target.owner}/${target.name}#${target.number}`;
+
+/** A commit as people write it. */
+export const shortSha = (sha) => sha.slice(0, 7);
+
+/** Who wrote or opened something: GitHub answers no author for an account it deleted. @param {string | null} who */
+export const byName = (who) => who ?? "A deleted account";
 
 /** What gh's stderr says went wrong, first match wins. The README lists which texts were seen from a real gh. */
 const STDERR = [

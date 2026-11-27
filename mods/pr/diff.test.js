@@ -1,13 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { GhError, parseFiles } from "./github.js";
-import { CUT_COLUMNS, coloursOf, cutSpans, diffOf, helperInput, noColours, paintRows, patchRows, plainNote, rowLines, rowNumber, untabSpans, wrapSpans } from "./diff.js";
-import { fixtures } from "./recorded.js";
+import { CUT_COLUMNS, coloursOf, cutSpans, diffOf, helperInput, isLine, lastLine, noColours, paintRows, patchRows, plainNote, rowLines, rowNumber, rowSpans, untabSpans, wrapSpans } from "./diff.js";
+import { readJson } from "./recorded.js";
 
 /** What `gh api repos/ramtinJ95/first-game/pulls/146/files --paginate --slurp` printed. */
-const filesAnswer = () => JSON.parse(readFileSync(join(fixtures, "files-first-game-146.json"), "utf8"));
+const filesAnswer = () => readJson("files-first-game-146.json");
 const count = (rows, kind) => rows.filter((row) => row.kind === kind).length;
 
 test("a recorded files answer reads as each file's path, status, counts and diff", () => {
@@ -59,9 +57,9 @@ test("synthetic: a tab is padded to the next 4-column stop, since text draws it 
   assert.deepEqual(patchRows("@@ -1 +1 @@\n+\tif (x) {\n+ab\tc").slice(1).map((row) => row.text), ["    if (x) {", "ab  c"]);
 });
 
-test("synthetic: a diff is laid out for its widest row and its largest line number", () => {
-  const { rows, columns, digits } = diffOf("@@ -98,2 +98,3 @@\n a\n+a longer line\n b");
-  assert.deepEqual([rows.length, columns, digits], [4, "@@ -98,2 +98,3 @@".length, 3]);
+test("synthetic: a diff is laid out for its largest line number", () => {
+  const { rows, digits } = diffOf("@@ -98,2 +98,3 @@\n a\n+a longer line\n b");
+  assert.deepEqual([rows.length, digits], [4, 3]);
 });
 
 test("synthetic: a file GitHub gives no diff for has a null patch; a rename keeps its old path", () => {
@@ -167,9 +165,24 @@ test("every recorded row takes as many lines as its cut text folds into, and a h
   assert.ok(rows.some((row) => row.text.length > 40), "the recording has lines that fold");
   for (const columns of [20, 40, 97, CUT_COLUMNS]) {
     for (const row of rows) {
-      const folded = row.kind === "hunk" || row.kind === "note" ? 1 : wrapSpans(cutSpans([[0, row.text, 0]], CUT_COLUMNS), columns).length;
+      const folded = isLine(row) ? rowSpans(row, columns).length : 1;
       assert.equal(rowLines(row, columns), folded, `${row.kind} row of ${row.text.length} characters at ${columns}`);
     }
   }
   assert.equal(rowLines({ kind: "add", old: null, new: 1, text: "x".repeat(CUT_COLUMNS * 3) }, 100), CUT_COLUMNS / 100);
+});
+
+test("synthetic: a row's text is drawn as its own spans when it fits, and cut then folded when it does not", () => {
+  const spans = [[4, "const", 0], [0, " a = 1;", 0]];
+  const row = { kind: "add", old: null, new: 1, text: "const a = 1;", spans };
+  assert.equal(rowSpans(row, 80)[0], spans);
+  assert.deepEqual(rowSpans(row, 5), wrapSpans(spans, 5));
+  const long = { kind: "same", old: 1, new: 1, text: "x".repeat(CUT_COLUMNS + 50) };
+  assert.deepEqual(rowSpans(long, 100), wrapSpans(cutSpans([[0, long.text, 0]], CUT_COLUMNS), 100));
+  assert.deepEqual(rowSpans({ kind: "same", old: 1, new: 1, text: "" }, 10), [[[0, "", 0]]]);
+});
+
+test("synthetic: a line of the file is any row but a hunk's header or a note; stderr's last line says what went wrong", () => {
+  assert.deepEqual(patchRows("@@ -1 +1,2 @@\n a\n+b\n\\ No newline at end of file").map(isLine), [false, true, true, false]);
+  assert.equal(lastLine("warning\nError: boom\n"), "Error: boom");
 });

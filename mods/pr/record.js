@@ -1,6 +1,6 @@
 // Records what GitHub says about a pull request's checks while they run, for the replay tests.
 // node mods/pr/record.js <out dir> <owner/repo>... [--pr owner/repo#N] [--tick 3] [--hours 6]
-// A frame is written only when the answer changed; polls.tsv has every poll, for measuring lag.
+// A frame is written only when the answer changed.
 import { execFile } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { graphqlArgs, prArgs } from "./query.js";
@@ -42,17 +42,13 @@ async function capture(repo, number) {
   const at = new Date().toISOString();
   const res = await gh(prArgs({ host: HOST, owner, name, number }, { steps: true }));
   const body = json(res), pr = body.data?.repository?.pullRequest ?? null, rollup = rollupOf(pr);
-  const runs = [...new Set((rollup?.contexts?.nodes ?? []).map((c) => c.checkSuite?.workflowRun?.databaseId).filter(Boolean))];
-  const fetched = await Promise.all(runs.sort().map(async (id) => [id, json(await gh(["api", `repos/${repo}/actions/runs/${id}/jobs?per_page=100`]))]));
-  const jobs = Object.fromEntries(fetched);
-  const shown = JSON.stringify({ pr, jobs, errors: body.errors ?? null });
+  const shown = JSON.stringify({ pr, errors: body.errors ?? null });
   rec.polls++;
-  appendFileSync(`${out}/polls.tsv`, `${at}\t${key}\t${res.ms}\t${body.data?.rateLimit?.cost ?? ""}\t${body.data?.rateLimit?.remaining ?? ""}\t${shown === rec.last ? "same" : "changed"}\n`);
   if (shown !== rec.last) {
     const oracle = await gh(["pr", "checks", String(number), "-R", repo, "--json", ORACLE]);
     const again = json(await gh(prArgs({ host: HOST, owner, name, number }, { steps: true })));
     const steady = JSON.stringify(again.data?.repository?.pullRequest ?? null) === JSON.stringify(pr);
-    appendFileSync(rec.file, JSON.stringify({ at, repo, number, ms: res.ms, rateLimit: body.data?.rateLimit ?? null, pr, errors: body.errors ?? null, jobs,
+    appendFileSync(rec.file, JSON.stringify({ at, repo, number, ms: res.ms, rateLimit: body.data?.rateLimit ?? null, pr, errors: body.errors ?? null,
       oracle: { code: oracle.code, checks: json(oracle), stderr: oracle.stderr, steady } }) + "\n");
     rec.last = shown; rec.frames++;
     console.log(`${at} ${key} frame ${rec.frames} rollup=${rollup?.state ?? "none"} head=${pr?.headRefOid?.slice(0, 7)} contexts=${rollup?.contexts?.nodes?.length ?? 0}`);
