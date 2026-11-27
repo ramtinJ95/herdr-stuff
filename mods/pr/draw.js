@@ -368,7 +368,7 @@ function reviewBar(app, t, reading, now) {
       : `Post ${plural(count, "annotation")} on GitHub as a review of ${there}? Enter posts them, Esc keeps them here.`;
     return bar(line(words, t.foreground));
   }
-  if (going !== undefined) return bar(line(going[1], t.muted));
+  if (going !== undefined) return bar(line(app.closing ? `${going[1]} It closes once that has gone.` : going[1], t.muted));
   if (notice !== null) return bar(line(notice, t.muted));
   const { annotation: one, thread } = app.active();
   if (thread !== null) {

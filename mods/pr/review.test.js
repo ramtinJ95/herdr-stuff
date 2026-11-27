@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { parseAbout, parseFiles } from "./github.js";
 import { diffOf } from "./diff.js";
 import { readJson } from "./recorded.js";
-import { EMPTY, activeNote, annotatedRows, askWords, countByPath, dropAnnotation, markAsked, saveDraft, sortAnnotations, spotOf, stops, threadStretch, threadWhere, threadsByPath, toSend } from "./review.js";
+import { EMPTY, activeNote, annotatedRows, askWords, countByPath, dropAnnotation, goneWith, markAsked, saveDraft, sortAnnotations, spotOf, stops, threadStretch, threadWhere, threadsByPath, toSend } from "./review.js";
 import { HEAD, on, reviewOf, rows, thread } from "./samples.js";
 
 test("a stretch is named by its lines as the file is now, removed lines by where they were", () => {
@@ -43,6 +43,12 @@ test("an edit replaces the annotation in place, and forgets how asking the old w
 test("what is sent as a review is every annotation but the questions, which went as they were asked", () => {
   const { annotations } = reviewOf(["issue", on(2, 4), "Three is wrong."], ["question", on(1, 1), "Why?"], ["comment", null, "Good overall."], ["suggestion", on(5, 5), "Drop it."]);
   assert.deepEqual(toSend(annotations).map((one) => one.id), ["a1", "a3", "a4"]);
+});
+
+test("what was sent leaves the pane with the questions already asked; one not asked, or whose asking failed, stays", () => {
+  const noted = reviewOf(["issue", on(2, 4), "Three is wrong."], ["question", on(1, 1), "Asked"], ["question", on(3, 3), "Not asked"], ["question", on(5, 5), "Failed"]);
+  const { annotations } = markAsked(markAsked(noted, "a2", "sent"), "a4", { failed: "no agent" });
+  assert.deepEqual(goneWith(annotations).map((one) => one.id), ["a1", "a2"]);
 });
 
 test("a deleted annotation is gone and its id is not given again", () => {

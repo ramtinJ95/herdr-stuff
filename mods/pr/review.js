@@ -37,6 +37,13 @@ export const EMPTY = { annotations: [], nextId: 1 };
 export const toSend = (annotations) => annotations.filter((one) => one.kind !== "question");
 
 /**
+ * What leaves the pane once a review has gone: what was sent, and the questions that were asked. A question not asked
+ * yet, or whose asking failed, stays.
+ * @param {Annotation[]} annotations
+ */
+export const goneWith = (annotations) => annotations.filter((one) => one.kind !== "question" || one.ask === "sent");
+
+/**
  * Whether the rows an annotation was written on are these rows: it was written at this commit, and the diff still has
  * them. One that is not stands above the file's first line, is not under the cursor, and is posted with its lines quoted.
  * @param {Spot} target @param {DiffRow[]} rows the rows of the target's file at `head`

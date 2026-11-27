@@ -80,7 +80,7 @@ A line longer than the diff is wide folds at its edge, as a terminal folds it, s
 
 ## Window
 
-`w` opens the pull request in a window that floats over the layout, 94% of the app wide and 92% high, on the file and the line you were at. It starts from what the pane has already read, so it is there at once, with Merge off until GitHub has answered it too. Everything works in it as in the pane, and a review goes to the same agent. Its header drags it; `q`, the ✕ or Esc closes it, and the pane under it is as you left it. Esc first gives up what is half done, then leaves the diff for the list, so from a diff it closes on the second press. While it is open the `pr.<command>`s are its own.
+`w` opens the pull request in a window that floats over the layout, 94% of the app wide and 92% high, on the file and the line you were at. It starts from what the pane has already read, so it is there at once, with Merge off until GitHub has answered it too. Everything works in it as in the pane, and a review goes to the same agent. Its header drags it; `q`, the ✕ or Esc closes it, and the pane under it is as you left it. Closed while a review, a reply or a merge is on its way, it stays until that has gone and then closes, as the pane does: Herdr drops what a closed copy is waiting on, and the notes would stay to be sent twice. Closing the pane with Herdr's own key, or quitting, does not wait. Esc first gives up what is half done, then leaves the diff for the list, so from a diff it closes on the second press. While it is open the `pr.<command>`s are its own.
 
 ## Review
 
@@ -101,8 +101,8 @@ Enter or `l` on a file puts the keyboard in its diff, and a click on a line does
 | f, then Enter | Send the GitHub thread the cursor is on to the agent, with the lines it is on |
 | n, p | The next or previous file |
 | w | Open this diff in a window, at this line |
-| y, then Enter | Send every comment, suggestion and issue to the agent as one review. They leave the pane once sent |
-| Y, then Enter | Post them on GitHub as one review, each a comment on its lines. They leave the pane once posted |
+| y, then Enter | Send every comment, suggestion and issue to the agent as one review. They leave the pane once sent, and the questions already asked with them; a question whose asking failed stays |
+| Y, then Enter | Post them on GitHub as one review, each a comment on its lines. They leave the pane once posted, as with `y` |
 | A, then Enter | Approve the pull request on GitHub, with them if there are any |
 | Esc | Give up the field, the range, then the diff, one at a time; in a window, once more closes it |
 

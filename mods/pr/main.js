@@ -8,7 +8,7 @@ import { detailOf, moveSelection, paneRows, rowIndex, rowUrl, selectedRow } from
 import { rowLines } from "./diff.js";
 import { colouredDiff } from "./pierre/colours.js";
 import { confirmMerge, mergeOffer, mergePress } from "./merge.js";
-import { EMPTY, activeNote, annotatedRows, itemId, markAsked, toSend } from "./review.js";
+import { EMPTY, activeNote, annotatedRows, goneWith, itemId, markAsked, toSend } from "./review.js";
 import { READ_KEYS, isMove, readClick, readStep, retryReply, startReading, typing } from "./reading.js";
 import { agentOf, formatQuestion, formatReview, formatThread, postBlock, postingOf, sendResult } from "./send.js";
 import { liveShown, sceneOf } from "./state.js";
@@ -83,6 +83,8 @@ export default class PullRequest extends View {
      * @type {Map<string, Set<string>>}
      */
     this.going = new Map();
+    /** Set when the copy was asked to close while something was on its way: it closes once that has gone. */
+    this.closing = false;
     /** The annotations last read from the shared state, and the stored text they were read from. @type {Review} */
     this.review = EMPTY;
     this.reviewStored = null;
@@ -182,6 +184,7 @@ export default class PullRequest extends View {
     } else {
       const action = KEYS[e.keystroke];
       if (action === undefined) return void this.disarm(cx);
+      if (e.is_held === true && !isMove(action)) return;
       this.act(action, cx);
     }
     cx.stop_propagation();
@@ -528,6 +531,7 @@ export default class PullRequest extends View {
     cx.spawn(async (cx) => {
       const result = await go().finally(() => sending.delete(tag));
       then(result, cx);
+      this.settle();
       cx.notify();
     });
   }
@@ -550,12 +554,12 @@ export default class PullRequest extends View {
   }
 
   /**
-   * What `y` and `Y` send, and `sent`, which takes it out of the pane once it has gone: all of the annotations there
+   * What `y` and `Y` send, and `sent`, which takes it and the questions asked out of the pane once it has gone: those there
    * were when the key was pressed, from the review of the pull request they were on.
    */
   leaving() {
     const { annotations } = this.notes();
-    const key = this.reviewKey(), gone = new Set(annotations.map((one) => one.id));
+    const key = this.reviewKey(), gone = new Set(goneWith(annotations).map((one) => one.id));
     const sent = () => {
       const now = this.reviewAt(key);
       this.keep({ ...now, annotations: now.annotations.filter((one) => !gone.has(one.id)) }, key);
@@ -626,10 +630,27 @@ export default class PullRequest extends View {
    * Not named `close`: Herdr calls a view's `close` as the pane goes, and this would then take a second pane with it.
    */
   closePane() {
+    // Herdr drops what a closed copy is waiting on, though the gh or hc it started runs on: a review would arrive
+    // and its notes stay here to be sent again. So the copy goes once nothing is on its way.
+    if (this.busy()) {
+      this.closing = true;
+      this.look.notice = "It closes once what is on its way has gone.";
+      return;
+    }
     if (this.overlay !== null) return void closeOverlay(this.overlay);
     const mine = this.copies();
     const pane = (mine.find((p) => p.focused) ?? mine[0])?.pane;
     if (pane !== undefined) run("pane.close", { pane });
+  }
+
+  /** Whether anything is on its way out of this copy: a send, a write to GitHub, a merge. */
+  busy() {
+    return this.look.merge.step === "running" || [...this.going.values()].some((tags) => tags.size > 0);
+  }
+
+  /** Something on its way has gone: the copy closes now, if it was asked to meanwhile and nothing else is. */
+  settle() {
+    if (this.closing && !this.busy()) this.closePane();
   }
 
   /** The panes of this mod in this one's tab. */
@@ -694,6 +715,7 @@ export default class PullRequest extends View {
         look.merge = s === null || method === null ? IDLE : await confirmMerge((argv) => gh(argv, s.place), s.target, method, head);
         cx.notify();
         if (look === this.look) this.watch.refresh(cx);
+        this.settle();
       });
     }
     cx.notify();
