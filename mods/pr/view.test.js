@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { summarize } from "./model.js";
-import { FILES_SHOWN, aboutLine, ago, blockerWords, currentStep, failureLines, headlineOf, liveShown, moveSelection, paneRows, reviewerWords, rowUrl, rowsOf, selectedRow, stepLink } from "./view.js";
+import { FILES_SHOWN, aboutLine, ago, blockerWords, currentStep, failureLines, headlineOf, liveShown, moveSelection, paneRows, reviewerWords, rowUrl, rowsOf, saidLine, selectedRow, stepLink, threadsLine } from "./view.js";
 
 let ids = 0;
 const check = (bucket, extra = {}) => ({
@@ -159,7 +159,23 @@ test("the description is the pane's first row, and the selection still starts on
 });
 
 const about = (extra = {}) => ({
-  body: "", author: "ramtinJ95", createdAt: "2026-11-26T16:00:00Z", updatedAt: "2026-11-26T18:00:00Z", labels: [], reviews: [], asked: [], comments: 0, commits: 1, ...extra,
+  body: "", author: "ramtinJ95", createdAt: "2026-11-26T16:00:00Z", updatedAt: "2026-11-26T18:00:00Z", mine: true, labels: [], reviews: [], asked: [], comments: 0, commits: 1,
+  talk: [], earlier: 0, threads: [], threadsHidden: 0, ...extra,
+});
+
+test("what was said under the description reads as who, as what, and when", () => {
+  const now = Date.parse("2026-11-26T19:00:00Z");
+  const said = (who, state) => ({ who, state, body: "", at: "2026-11-26T17:00:00Z", url: "https://github.com/o/n/pull/1#r" });
+  assert.deepEqual([said("ada", null), said("bo", "APPROVED"), said(null, "CHANGES_REQUESTED"), said("cy", "COMMENTED")].map((one) => saidLine(one, now)),
+    ["ada commented 2 h ago", "bo approved 2 h ago", "A deleted account asked for changes 2 h ago", "cy commented 2 h ago"]);
+});
+
+test("the threads on the diff are counted in a line, with how many are still open", () => {
+  const threads = [{ resolved: true }, { resolved: false }, { resolved: true }];
+  assert.equal(threadsLine(about()), null);
+  assert.equal(threadsLine(about({ threads })), "3 threads on the diff, 1 not resolved. They stand among the lines under Files.");
+  assert.equal(threadsLine(about({ threads: [threads[0]] })), "1 thread on the diff, all resolved. They stand among the lines under Files.");
+  assert.equal(threadsLine(about({ threads: [threads[0]], threadsHidden: 4 })), "5 threads on the diff, those read here all resolved; 4 of them only on GitHub. They stand among the lines under Files.");
 });
 
 test("the description's first line says who opened it, when, and how much is on it", () => {
