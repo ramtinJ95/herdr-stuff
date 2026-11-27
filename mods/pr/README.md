@@ -4,11 +4,12 @@ A [Herdr app](https://herdr.dev) mod that shows the pull request of the branch y
 
 - its stage: no pull request yet, draft, open, merged or closed;
 - whether it can merge, and what blocks it: a draft, conflicts, behind the base branch, a review, required checks, a branch rule;
-- its description, with who opened it and when, its reviewers and where each stands, its labels, and how many commits and comments it has;
+- its description, with who opened it and when, its reviewers and where each stands, its labels, and the comments and reviews under it;
 - every check, grouped as failed, running, cancelled, passed and skipped, with the step a running GitHub Actions job is on;
 - the steps of the check you select, beside the list when the pane is 720 px or wider and under the row when it is narrower;
 - the files it changes and each file's diff, in syntax colours;
-- your review of the diff: notes on its lines, and questions, sent to the agent in the tab;
+- your review of the diff: notes on its lines, and questions, sent to the agent in the tab or posted on GitHub as a review;
+- GitHub's review threads among the diff's lines, to reply to, resolve, or hand to the agent;
 - Merge, when GitHub reports the pull request clean.
 
 It needs the [GitHub CLI](https://cli.github.com) (`gh`), logged in.
@@ -63,7 +64,9 @@ In a wide pane and in the window, the line between the list and what stands besi
 
 ## Description
 
-The first row is the description, drawn as Markdown, open until you close it; every pane remembers which. Its comments are counted, not shown: `o` on the row opens the pull request on GitHub.
+The first row is the description, drawn as Markdown, open until you close it; every pane remembers which. `o` on the row opens the pull request on GitHub.
+
+Under it is the conversation, oldest first: the latest 30 comments, and of the latest 30 reviews those that say something, in words of their own or as an approval or a request for changes. A review that only carries line comments is not there: its comments are the threads. A line counts what came before, and a last line counts the threads on the diff and how many are not resolved. They stand among the lines under Files.
 
 ## Files
 
@@ -92,11 +95,15 @@ Enter or `l` on a file puts the keyboard in its diff, and a click on a line does
 | c, s, i | Note a comment, a suggestion or an issue on the line or range |
 | a | Ask a question about the line or range: it goes to the agent as soon as you press Enter |
 | o | Note a comment on the pull request as a whole |
-| h, l | The annotation before or after, in whichever file it is |
-| r, x | Change or delete the annotation the cursor is on |
+| h, l | The annotation or GitHub thread before or after, in whichever file it is |
+| r, x | Change or delete the annotation the cursor is on. On a GitHub thread, `r` replies to it |
+| z | Resolve the GitHub thread the cursor is on, or open a resolved one again |
+| f, then Enter | Send the GitHub thread the cursor is on to the agent, with the lines it is on |
 | n, p | The next or previous file |
 | w | Open this diff in a window, at this line |
 | y, then Enter | Send every comment, suggestion and issue to the agent as one review. They leave the pane once sent |
+| Y, then Enter | Post them on GitHub as one review, each a comment on its lines. They leave the pane once posted |
+| A, then Enter | Approve the pull request on GitHub, with them if there are any |
 | Esc | Give up the field, the range, then the diff, one at a time; in a window, once more closes it |
 
 An annotation is typed on one line in a field under the diff: Enter keeps it, Esc or an empty field gives it up. It then stands under the last line it covers, its lines carry its mark in the gutter, and the file's row counts it. The bar under the diff shows the one the cursor is on in full.
@@ -107,7 +114,19 @@ It goes to the tab's agent: the terminal the pane follows when an agent runs in 
 
 Annotations are kept per pull request until they are sent or deleted, in Herdr's shared state (`pr.reviews` in `shared.json`). So closing the pane loses none, and a pane that follows its tab, a pinned pane and a window on the same pull request all show the same ones. Each remembers the commit it was written at. After a push, those of earlier commits stand above the file's first line, since their rows may no longer be these rows, and are sent with their old lines and that commit named.
 
-Each `pr.<action>` works as a command while the keyboard is in a diff (`herdr-app do pr.range`), `pr.finish` and `pr.confirm` among them.
+Each `pr.<action>` works as a command while the keyboard is in a diff (`herdr-app do pr.range`), `pr.finish`, `pr.post` and `pr.confirm` among them. An approval does not: there is no `pr.approve`, and `pr.confirm` does not give one. Like Merge it takes `A` and Enter in the pane.
+
+### On GitHub
+
+`Y` posts what you noted as one review, with the verdict "Comment": every comment, suggestion and issue becomes a comment on the lines it was written on, a suggestion or an issue named as one in bold. The bar asks first, and Enter posts. What GitHub has no line for goes in the review's own words, with the lines quoted: a note on the pull request as a whole, one written at an earlier commit, one on a hunk's header. A range that crosses hunks keeps the part in its last hunk, which is all GitHub takes. Questions are not posted: they went to the agent. Once GitHub has taken the review the annotations leave the pane, and what you posted comes back as threads. If it does not take it, the bar says why in GitHub's words and the annotations stay.
+
+`A` approves, with the same comments when there are any. It is offered on an open pull request that someone else opened: GitHub takes no approval from the author. There is no "Request changes".
+
+GitHub's own threads stand among the lines like annotations do: one row under the line each is on, marked `◆` in the gutter along its lines, dimmed once resolved. The bar under the diff shows the one the cursor is on in full, every comment as Markdown. A thread whose lines have changed since (outdated), one on the file as a whole, and one on a line the diff does not show stand above the file's first line. A file's row counts its open threads, or its resolved ones when none is open.
+
+`r` on a thread opens the field for a reply, and Enter posts it at once; a reply GitHub does not take comes back into the field with the reason. `z` resolves it, or opens it again, where GitHub lets you. `f` hands it to the tab's agent, as `y` hands it your review: where it is, its lines, and all that was written in it.
+
+A review, an approval and a reply go only on Enter, in answer to a line that says what goes where. `z` acts at once, and a second `z` takes it back.
 
 ## Merge
 
@@ -125,7 +144,8 @@ There is no `pr.merge` command: `herdr-app do` and key bindings cannot merge.
 ## When it asks GitHub
 
 - Every 10 seconds while checks run, every 60 seconds for an open pull request whose checks have settled, never for a merged or closed one. `POLL` in `model.js` holds the delays.
-- The description while its row is open, and again only when the pull request's `updatedAt` moves: an edit, a comment, a review, a push. One more call of 1 point, about 0.5 s. Folded, it is not asked for.
+- The description, the conversation and the threads, in one call, while Description or Files is open, and again only when the pull request's `updatedAt` moves: an edit, a comment, a review, a push. One more call of 1 point, about 0.8 s on a pull request with six threads. With both folded it is not asked for. It is also asked after the pane has posted, replied or resolved, and by `r`: resolving a thread on github.com may not move `updatedAt`.
+- A review, a reply and a resolve are one call each, only when you send them.
 - The files while their row is open, once per head commit: one REST call per 100 files, which carries every diff. It took 0.6 to 1.1 s on three pull requests of 3 to 30 files. They are not saved between runs. The colours ask GitHub nothing: one run of `node` after the files land, 0.3 to 1.7 s on those three.
 - Not at all while the window is hidden or the pane's tab is not the one shown. It asks at once when the tab shows again.
 - Each poll is one query, plus one beside it for the steps of up to 6 running jobs. A finished job's steps are asked for once and kept. Selecting a check asks for its steps alone, not a poll. Each call costs 1 point of GitHub's 5,000 an hour, so a pane left visible on a running pull request uses about 650 an hour.
@@ -144,8 +164,9 @@ It draws with `theme()` and the terminal palette (`ansi1`, `ansi2`, `ansi3`) for
 - A space on another machine runs `gh` there. That path is written and has not been run.
 - Only GitHub Actions jobs have steps. Another service's check shows its state, description and link.
 - A running job's log. GitHub gives it only when the job ends.
-- Review comments on GitHub itself: what you note goes to the tab's agent, and nothing is posted to the pull request.
-- An annotation longer than one line, and the agent's answer to a question in the pane. An annotation's row among the lines is cut at the pane's edge and does not fold; the bar under the diff has it whole.
+- "Request changes" as a verdict, a new comment under the description, and editing or deleting what is on GitHub.
+- Threads beyond the first 100, comments beyond a thread's first 30, and the conversation before its latest 30 comments and 30 reviews are counted, not shown.
+- An annotation or a reply longer than one line, and the agent's answer to a question in the pane. An annotation's or a thread's row among the lines is cut at the pane's edge and does not fold; the bar under the diff has it whole.
 
 `props: { "replay": "/path/frame.json" }` draws one recorded answer instead of asking GitHub, with Merge off. The screenshots of each state were made with it.
 
@@ -153,12 +174,12 @@ It draws with `theme()` and the terminal palette (`ansi1`, `ansi2`, `ansi3`) for
 
 The pane asks `gh` about the pull request for the branch checked out in a folder. It reads the answers in four files, and `merge.js` holds the one thing it changes. `main.js` runs one call at a time: a confirmed merge, else the poll or lookup that is due, else the steps, description and files the snapshot lacks.
 
-- `query.js` holds the GraphQL. `PR_QUERY` is the poll, which `record.js` shares. It asks for steps only with `$steps`, because steps make a poll about three times slower, and it carries the repository's merge methods, so Merge needs no call of its own. `STEPS_QUERY` asks for the steps of a few check runs by node id. `ABOUT_QUERY` asks for the description, author, labels and reviewers, apart from the poll because none of it moves with CI. `prArgs`, `stepsArgs` and `aboutArgs` build the `gh api graphql` arguments from where the pull request lives. `filesArgs` is the one REST call, `pulls/<number>/files`: GraphQL has no diffs.
-- `github.js` is the boundary. `parsePr` turns a `PR_QUERY` answer into a `Snapshot` and throws a `GhError` with a `kind` when the answer has errors or a field it does not read. `mergeSteps` sets the steps from a `STEPS_QUERY` answer on a snapshot. `parseAbout` turns an `ABOUT_QUERY` answer into an `About`. `prLookupArgs` and `parseLookup` find the pull request for a folder's branch with `gh pr view`. `classifyFailure` names what went wrong from a non-zero exit, and `classifyRejection` does the same for a rejected `exec` or a `GhError`. `readAnswer` reads a gh run with a parser and gives the value or the failure. `parseFiles` turns a `filesArgs` answer into the files, each with its patch or null.
+- `query.js` holds the GraphQL. `PR_QUERY` is the poll, which `record.js` shares. It asks for steps only with `$steps`, because steps make a poll about three times slower, and it carries the repository's merge methods, so Merge needs no call of its own. `STEPS_QUERY` asks for the steps of a few check runs by node id. `ABOUT_QUERY` asks for the description, author, labels and reviewers, the comments and reviews, and the review threads, apart from the poll because none of it moves with CI. `prArgs`, `stepsArgs` and `aboutArgs` build the `gh api graphql` arguments from where the pull request lives. `filesArgs` is the one REST call, `pulls/<number>/files`: GraphQL has no diffs. `replyArgs` and `resolveArgs` write to a thread. `reviewArgs` posts a review as one `addPullRequestReview` mutation with its values written into the query: gh's `-f` and `-F` flags cannot say a list of comments, since gh gathers the two kinds apart and a comment's words and its line number land in different comments.
+- `github.js` is the boundary. `parsePr` turns a `PR_QUERY` answer into a `Snapshot` and throws a `GhError` with a `kind` when the answer has errors or a field it does not read. `mergeSteps` sets the steps from a `STEPS_QUERY` answer on a snapshot. `parseAbout` turns an `ABOUT_QUERY` answer into an `About`, with the conversation in the order it was written and each thread's line, side and rights. `prLookupArgs` and `parseLookup` find the pull request for a folder's branch with `gh pr view`. `classifyFailure` names what went wrong from a non-zero exit, and `classifyRejection` does the same for a rejected `exec` or a `GhError`. `readAnswer` reads a gh run with a parser and gives the value or the failure. `parseFiles` turns a `filesArgs` answer into the files, each with its patch or null.
 - `diff.js` is pure. `patchRows` turns one file's patch into rows, each with its kind and its line number before and after. `diff.test.js` checks them against a recorded answer: the added and removed rows of each file add up to GitHub's own counts. `coloursOf` reads a run of the helper, and `paintRows` puts its lines on the rows only when every line is the same line: same count, kind, number and text. `wrapSpans` folds a line's spans at a width and `rowLines` counts the lines that gives, which is the row's height. Colours on the wrong line would be worse than none, so one line off leaves that file plain, and `plainNote` gives the reason.
 - `pierre/highlight.mjs` is the helper, for node and not for Herdr. It gives Pierre each file's diff under a theme whose colours only name roles (`ROLES` in `diff.js`), and prints each line as spans of role, text and whether that part changed. Its answer is the same in every theme. `pierre/highlight.test.js` runs it as the pane does, on the recorded answer, and is skipped where the package is not installed.
 - `model.js` is pure. `summarize` gives the stage, the CI state, what blocks the merge, the headline and its tone. `groups` gives the check rows in display order. `stepsWanted` picks the checks to ask steps for, and `keepSteps` carries a finished job's steps into the next poll's snapshot. `nextPollDelay` and `failureDelay` read the `POLL` table. `offersMerge` says whether the pane offers Merge. `describeFailure` gives the line for a failure. `duration` formats elapsed time.
-- `review.js` is the review, pure. `targetOf` names a stretch of a diff's rows and quotes them; `saveDraft`, `dropAnnotation` and `markAsked` change the annotations; `annotatedRows` lays them among a file's lines; `formatReview` and `formatQuestion` are what the agent is sent; `agentOf` picks the terminal and refuses a shell; `sendResult` reads how `hc send` went. `main.js` keeps the cursor, the field and the sends.
+- `review.js` is the review, pure. `targetOf` names a stretch of a diff's rows and quotes them; `saveDraft`, `dropAnnotation` and `markAsked` change the annotations; `annotatedRows` lays them among a file's lines; `formatReview` and `formatQuestion` are what the agent is sent; `agentOf` picks the terminal and refuses a shell; `sendResult` reads how `hc send` went. For GitHub, `threadStretch` finds the rows a thread is on by its line and side, and `annotatedRows` lays the threads among the lines too; `stops` orders annotations and threads for `h` and `l`; `githubLines` names a stretch of rows as GitHub does, by line and side within one hunk, and `postingOf` builds the review from the annotations; `postBlock` says why a review cannot go; `formatThread` is a thread as the agent is sent it. `review.test.js` places the threads of a recorded pull request (cli/cli#15081) on its recorded diff: each stands under the line GitHub names. `main.js` keeps the cursor, the field and the sends.
 - What is stored is in two places. Herdr keeps one `localStorage` per mod and props, so a following pane, each pinned pane and the window have their own: it holds only the cache of the last answer. What all of them must agree on is in Herdr's shared state: the annotations (`pr.reviews`), and which of Description and Files are open and the list's width (`pr.view`).
 - `merge.js` is Merge. `mergeOffer` is the one reading of it: no button, a note, the button off, at rest or armed. The row is drawn from that offer and `mergePress` says what a press does to it, both pure. `confirmMerge` is the second press: it takes the function that runs `gh`, so `merge.test.js` runs it against a recorded answer and a stand-in for `gh pr merge`.
 
@@ -209,7 +230,8 @@ The tests replay recordings of real pull requests through `parsePr` and `summari
 1. Record. `node mods/pr/record.js <folder> <owner/repo>...` polls every open PR with running checks and writes one JSON line per change. `--pr owner/repo#N` records one PR until it settles. Each line has the `PR_QUERY` answer with steps, the REST jobs, and `gh pr checks` taken right after as `oracle`. `oracle.steady` is true when the PR answer did not change across the `gh pr checks` call. Only steady frames are compared.
 2. Pack. `node mods/pr/pack.js <folder or file>...` writes one gzipped file per recording into `fixtures/`. It drops the REST jobs, refuses any frame from a repository not on its public allow list, and fails above 1.5 MB.
 3. Capture the failures. `node mods/pr/capture.js <owner/repo#N>` runs gh where each failure happens and writes `fixtures/failures.json`. It also writes `fixtures/live.json`, a live poll without steps and two `STEPS_QUERY` answers for that PR.
-4. Test. Run `npm test` at the repository root. To compare more recordings without committing them, set `PR_FIXTURES_EXTRA` to their folder: `PR_FIXTURES_EXTRA=/path/to/recordings npm test`. That folder can hold `.jsonl` or `.jsonl.gz` files.
+4. The description and the files have one recorded answer each per pull request, as `gh` printed them for `aboutArgs` and `filesArgs`: `fixtures/about-<repo>-<number>.json` and `files-<repo>-<number>.json`. Those of cli/cli#15081 are another project's public pull request, kept for its six review threads.
+5. Test. Run `npm test` at the repository root. To compare more recordings without committing them, set `PR_FIXTURES_EXTRA` to their folder: `PR_FIXTURES_EXTRA=/path/to/recordings npm test`. That folder can hold `.jsonl` or `.jsonl.gz` files.
 
 `failures.json` marks each sample as seen or assumed. These were seen from gh 2.102.1:
 

@@ -3,8 +3,9 @@ import { Input, Scrollbar, TextView, h_flex, h_resizable, resizable_panel, v_fle
 import { settings, theme } from "herdr";
 import { CUT_COLUMNS, ROLES, cutSpans, rowNumber, wrapSpans } from "./diff.js";
 import { duration, hasSteps, plural, summarize } from "./model.js";
-import { KINDS, activeAnnotation, askWords, countByPath, stretch, toSend } from "./review.js";
-import { aboutLine, ago, blockerWords, currentStep, failureLines, headlineOf, liveShown, reviewerWords, selectedRow, stepLink } from "./view.js";
+import { firstLine } from "./github.js";
+import { KINDS, askWords, countByPath, stretch, threadStretch, threadWhere, threadsByPath, toSend } from "./review.js";
+import { aboutLine, ago, blockerWords, currentStep, failureLines, headlineOf, liveShown, reviewerWords, saidLine, selectedRow, stepLink, threadsLine } from "./view.js";
 
 export const WIDE_PX = 720;
 /** The narrowest the list is dragged to beside a diff or a check's steps, in px. */
@@ -79,8 +80,8 @@ function snapshotView(app, t, s, now) {
   const file = app.detailFile();
   const pane = v_flex().size_full().min_h(0).child(header(app, t, s, sum, now));
   // A diff wants the pane's width: in a narrow pane it stands in place of the list until Esc.
-  if (!app.wide && file !== null) return pane.child(diffPane(app, t, file));
-  const noted = countByPath(app.notes().annotations);
+  if (!app.wide && file !== null) return pane.child(diffPane(app, t, file, now));
+  const noted = { mine: countByPath(app.notes().annotations), theirs: threadsByPath(app.threads()) };
   // Each row is one child of the list, whatever opens under it, so a row's place in `rows` is the child scroll_to_item reveals.
   const items = rows.map((row) => {
     const drawn = rowView(app, t, row, row === selected, clock, noted);
@@ -94,7 +95,7 @@ function snapshotView(app, t, s, now) {
   const list = v_flex().id("checks").min_w(0).min_h(0).py(4).overflow_y_scrollbar().track_scroll(app.scroll)
     .children(rows.some((r) => CHECK_ROWS.includes(r.kind)) ? items : [...items, line("No checks reported for this commit.", t.muted).px(14).py(8)]);
   if (!app.wide || !rows.some((r) => CHECK_ROWS.includes(r.kind) || r.kind === "file")) return pane.child(list.flex_1());
-  const side = file !== null ? div().size_full().min_w(0).child(diffPane(app, t, file))
+  const side = file !== null ? div().size_full().min_w(0).child(diffPane(app, t, file, now))
     : v_flex().id("details").size_full().min_w(0).overflow_y_scrollbar()
       .child(check !== null ? details(t, check, s, clock) : line("Select a check to see its steps, or a file to see its diff.", t.dim).p(12));
   // The divider between the two is dragged. Herdr keeps where it was left under the group's name, so a pane and a
@@ -181,12 +182,14 @@ function rowView(app, t, row, selected, now, noted) {
   if (row.kind === "file") {
     const { file } = row;
     const at = file.path.lastIndexOf("/") + 1;
+    const theirs = noted.theirs.get(file.path);
     return base.pl(32)
       .child(fileMark(t, file))
       .child(h_flex().flex_1().min_w(0).text_size(12.5)
         .child(div().min_w(0).truncate().text_color(t.dim).child(file.path.slice(0, at)))
         .child(div().flex_none().max_w_full().truncate().text_color(t.foreground).child(file.path.slice(at))))
-      .children(noted.has(file.path) ? [div().flex_none().text_size(11).text_color(t.ansi3).child(plural(noted.get(file.path), "note"))] : [])
+      .children(noted.mine.has(file.path) ? [div().flex_none().text_size(11).text_color(t.ansi3).child(plural(noted.mine.get(file.path), "note"))] : [])
+      .children(theirs === undefined ? [] : [div().flex_none().text_size(11).text_color(theirs.open ? t[THREAD_INK] : t.dim).child(theirs.text)])
       .children(fileCounts(t, file));
   }
   if (row.kind === "hidden") {
@@ -244,10 +247,14 @@ export function wrapColumns(width, digits) {
 
 /** A comment takes no side, so it has no colour: blue, the palette's fourth, is too dark to read on some terminals' black. */
 const KIND_INK = { issue: "ansi1", suggestion: "ansi2", question: "ansi3", comment: "muted" };
+/** One of GitHub's threads is somebody else's word on the line: it has a mark and a colour no annotation has. */
+const THREAD_GLYPH = "◆";
+const THREAD_INK = "ansi6";
 const HINTS = ["v range", "c comment", "s suggestion", "i issue", "a ask", "o on the whole", "h l between them", "n p files"];
+const who = (said) => said?.who ?? "A deleted account";
 
 /** One file's diff, filling the space it is given, with what is noted on it among its lines and the review's bar under it. */
-function diffPane(app, t, file) {
+function diffPane(app, t, file, now) {
   const reading = app.reader();
   const hint = reading !== null ? "Esc for the list" : !app.wide ? "Enter to annotate · Esc for the list" : app.overlay !== null ? "Enter to annotate · Esc closes" : "Enter to annotate";
   const top = h_flex().flex_none().h(30).px(12).gap(8).items_center().border_b_1().border_color(t.border)
@@ -279,12 +286,24 @@ function diffPane(app, t, file) {
         .children([moved ? `${one.target.where} at an earlier commit` : null, asked].filter((x) => x !== null).map((words) => div().flex_none().text_color(t.dim).child(words)))
         .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(one.body));
     }
+    if (item.type === "thread") {
+      const { thread, placed } = item;
+      const count = thread.comments.length + thread.more;
+      const meta = [placed ? null : threadWhere(thread, false), thread.resolved ? "resolved" : null, count > 1 ? `${count - 1} more` : null, app.sending.has(thread.id) ? "writing…" : null];
+      // A resolved thread is settled: it stands back from the ones still open.
+      return h_flex().w_full().h(height).flex_none().pl(left).pr(SCROLLBAR_PX).gap(8).items_center()
+        .bg(thread.id === app.activeId ? t.selected : t.raised)
+        .child(div().flex_none().text_color(thread.resolved ? t.dim : t[THREAD_INK]).child(`${THREAD_GLYPH} ${who(thread.comments[0])}`))
+        .children(meta.filter((x) => x !== null).map((words) => div().flex_none().text_color(t.dim).child(words)))
+        .child(div().flex_1().min_w(0).truncate().text_color(thread.resolved ? t.muted : t.foreground).child(firstLine(thread.comments[0]?.body ?? "")));
+    }
     const { row, index, mark } = item;
     const on = picked !== null && index >= picked.start && index <= picked.end;
     const at = reading !== null && index === reading.cursor;
     // The cursor and its range are a strip at the row's edge as well as a ground: a theme's `selected` may be its background.
     const strip = div().w(3).h_full().flex_none().when(on, (el) => el.bg(at ? t.foreground : t.dim));
-    const marked = div().w(char).ml(3).flex_none().text_color(mark === null ? t.dim : t[KIND_INK[mark]]).child(mark === null ? "" : KINDS[mark].glyph);
+    const marked = div().w(char).ml(3).flex_none().text_color(mark === null ? t.dim : mark === "thread" ? t[THREAD_INK] : t[KIND_INK[mark]])
+      .child(mark === null ? "" : mark === "thread" ? THREAD_GLYPH : KINDS[mark].glyph);
     if (row.kind === "hunk" || row.kind === "note") {
       return h_flex().w_full().h(height).flex_none().items_center().bg(on ? t.selected : t.raised).text_color(at ? t.foreground : t.dim)
         .child(strip).child(marked).child(div().flex_1().min_w(0).pl(6).pr(SCROLLBAR_PX).truncate().child(row.text));
@@ -308,42 +327,74 @@ function diffPane(app, t, file) {
     .child(v_virtual_list(id, items.length, sizes, (i) => String(i), (range) => items.slice(range.start, range.end).map(draw)).size_full()
       .track_scroll(app.lines).on_item_click((key, cx) => app.clickLine(cx, file, key)))
     .child(Scrollbar.vertical(id).viewport_from_layout().absolute().inset_0()))
-    .children(reviewBar(app, t, file, reading));
+    .children(reviewBar(app, t, reading, now));
 }
 
 /**
  * What stands under a diff while it is read: the field an annotation is typed in, the question before the review is
  * sent, what the last key did, the annotation the cursor is on in full, else the keys.
  */
-function reviewBar(app, t, file, reading) {
+function reviewBar(app, t, reading, now) {
   const { annotations } = app.notes();
-  if (reading === null && app.draft === null && app.activeId === null && app.notice === null && !app.sending.has("review")) return [];
+  const going = SENDING.find(([what]) => app.sending.has(what));
+  if (reading === null && app.draft === null && app.activeId === null && app.notice === null && going === undefined) return [];
   const bar = (...children) => [v_flex().flex_none().px(12).py(7).gap(5).border_t_1().border_color(t.border).children(children)];
-  const tag = (kind, target, extra) => h_flex().gap(8).items_center()
-    .child(div().flex_none().text_size(12).font_semibold().text_color(t[KIND_INK[kind]]).child(`${KINDS[kind].glyph} ${KINDS[kind].label}`))
-    .child(line([target === null ? "the whole pull request" : target.where, extra].filter((x) => x !== null).join(" · "), t.dim).min_w(0).truncate());
+  const tagged = (ink, name, words) => h_flex().gap(8).items_center()
+    .child(div().flex_none().text_size(12).font_semibold().text_color(ink).child(name))
+    .child(line(words.filter((x) => x !== null).join(" · "), t.dim).min_w(0).truncate());
+  const tag = (kind, target, extra) => tagged(t[KIND_INK[kind]], `${KINDS[kind].glyph} ${KINDS[kind].label}`, [target === null ? "the whole pull request" : target.where, extra]);
+  const threadTag = (thread, extra) => tagged(thread.resolved ? t.dim : t[THREAD_INK], `${THREAD_GLYPH} Thread`,
+    [threadWhere(thread, threadStretch(app.patched(thread.path), thread) !== null), thread.resolved ? "resolved" : null, thread.outdated ? "outdated" : null, extra]);
+  const field = () => div().id("annotation").h(30).px(8).flex().items_center().rounded(6).border_1().border_color(app.typing ? t.accent : t.input).cursor_text()
+    .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+    .child(Input.new(app.input).h_full().text_size(12.5).text_color(t.foreground));
   const to = app.agent();
+  const name = to.terminal === null ? "the agent" : to.name;
+  if (app.draft !== null && "reply" in app.draft) {
+    const { reply, failed } = app.draft;
+    return bar(threadTag(reply, failed === null ? "Enter posts the reply on GitHub, Esc gives it up" : `GitHub did not take it: ${failed} Enter tries again, Esc gives it up`), field());
+  }
   if (app.draft !== null) {
     const { kind, target } = app.draft;
     const enter = kind !== "question" ? "Enter keeps it, Esc gives it up" : to.terminal === null ? to.why : `Enter asks ${to.name}, Esc gives it up`;
-    return bar(tag(kind, target, enter),
-      div().id("annotation").h(30).px(8).flex().items_center().rounded(6).border_1().border_color(app.typing ? t.accent : t.input).cursor_text()
-        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .child(Input.new(app.input).h_full().text_size(12.5).text_color(t.foreground)));
+    return bar(tag(kind, target, enter), field());
   }
   const count = toSend(annotations).length;
-  if (app.confirming) return bar(line(`Send ${plural(count, "annotation")} to ${to.terminal === null ? "the agent" : to.name}? Enter sends them, Esc keeps them here.`, t.foreground));
-  if (app.sending.has("review")) return bar(line("Sending the review…", t.muted));
+  const asked = app.confirming;
+  if (asked !== null) {
+    const { target } = app.state;
+    const there = `${target.owner}/${target.name}#${target.number}`;
+    const words = asked.what === "send" ? `Send ${plural(count, "annotation")} to ${name}? Enter sends them, Esc keeps them here.`
+      : asked.what === "forward" ? `Send this thread to ${name}? Enter sends it, Esc does not.`
+      : asked.event === "APPROVE" ? `Approve ${there} on GitHub${count === 0 ? "" : `, with ${plural(count, "annotation")}`}? Enter approves it, Esc does not.`
+      : `Post ${plural(count, "annotation")} on GitHub as a review of ${there}? Enter posts them, Esc keeps them here.`;
+    return bar(line(words, t.foreground));
+  }
+  if (going !== undefined) return bar(line(going[1], t.muted));
   if (app.notice !== null) return bar(line(app.notice, t.muted));
-  const head = app.state.shown.files.head;
-  const one = activeAnnotation(annotations, app.activeId, file.path, head, reading?.cursor ?? -1);
+  const { annotation: one, thread } = app.active();
+  if (thread !== null) {
+    const keys = [thread.canReply ? "r to reply" : null, thread.resolved ? (thread.canUnresolve ? "z to open it again" : null) : thread.canResolve ? "z to resolve it" : null, `f to send it to ${name}`];
+    // A thread can be long: it scrolls in the bar, which leaves the diff most of the pane.
+    return bar(threadTag(thread, app.sending.has(thread.id) ? "writing…" : null),
+      v_flex().id(`thread:${thread.id}`).max_h(220).overflow_y_scrollbar().gap(6)
+        .children(thread.comments.map((said) => v_flex().gap(1)
+          .child(line(`${who(said)} · ${ago(Date.parse(said.at), now)}`, t.dim))
+          .child(div().min_w(0).child(TextView.markdown(`said:${said.url}`, said.body).selectable(true).text_size(12.5)))))
+        .children(thread.more === 0 ? [] : [line(`${plural(thread.more, "more comment")} on GitHub.`, t.dim)]),
+      line(keys.filter((x) => x !== null).join(" · "), t.dim));
+  }
   if (one !== null) {
     return bar(tag(one.kind, one.target, askWords(one, app.sending)),
       div().text_size(12.5).text_color(t.foreground).child(one.body),
       line("r to change it · x to delete it", t.dim));
   }
-  return bar(line([...count > 0 ? [`${plural(count, "annotation")}: y sends ${count === 1 ? "it" : "them"}`] : [], ...HINTS].join(" · "), t.dim).truncate());
+  const sends = count === 0 ? [] : [`${plural(count, "annotation")}: y to ${name}, Y to GitHub`];
+  return bar(line([...sends, ...app.postBlocked("APPROVE") === null ? ["A approve"] : [], ...HINTS].join(" · "), t.dim).truncate());
 }
+
+/** What is on its way out of the pane, and the line that says so while it is. */
+const SENDING = [["review", "Sending the review…"], ["post", "Posting the review on GitHub…"], ["forward", "Sending the thread…"]];
 
 function aboutBlock(t, s, now) {
   const say = (text) => line(text, t.dim).pl(32).pr(14).pb(8);
@@ -361,7 +412,23 @@ function aboutBlock(t, s, now) {
       div().px(6).rounded(4).border_1().border_color(t.border).text_size(11).text_color(t.muted).child(label)))))
     .when(error !== null, (el) => el.child(line(`It did not refresh: ${error}`, t.dim)))
     .child(about.body.trim() === "" ? line("No description.", t.dim)
-      : div().pt(4).min_w(0).child(TextView.markdown("about-body", about.body).selectable(true).text_size(12.5)));
+      : div().pt(4).min_w(0).child(TextView.markdown("about-body", about.body).selectable(true).text_size(12.5)))
+    .children(conversation(t, about, now));
+}
+
+/** What was said under the description, oldest first, and a line on the threads, which stand among the diff's lines. */
+function conversation(t, about, now) {
+  const threads = threadsLine(about);
+  const said = about.talk.map((one) => v_flex().pt(8).gap(2).border_t_1().border_color(t.border)
+    .child(h_flex().gap(6).items_center()
+      .child(div().w(6).h(6).flex_none().rounded_full().bg(toneInk(t, one.state === "APPROVED" ? "done" : one.state === "CHANGES_REQUESTED" ? "blocked" : "idle")))
+      .child(line(saidLine(one, now), t.muted)))
+    .children(one.body.trim() === "" ? [] : [div().min_w(0).child(TextView.markdown(`talk:${one.url}`, one.body).selectable(true).text_size(12.5))]));
+  return [
+    ...about.earlier === 0 ? [] : [line(`${about.earlier === 1 ? "1 earlier comment or review" : `${about.earlier} earlier comments and reviews`} on GitHub: o opens the pull request.`, t.dim).pt(8)],
+    ...said,
+    ...threads === null ? [] : [line(threads, t.muted).pt(8)],
+  ];
 }
 
 function details(t, c, s, now) {
